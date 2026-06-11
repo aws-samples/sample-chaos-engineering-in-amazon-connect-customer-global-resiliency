@@ -1,0 +1,133 @@
+{
+  "Version": "2019-10-30",
+  "StartAction": "entry-point",
+  "Metadata": {
+    "entryPointPosition": {"x": 20, "y": 20},
+    "Description": "Chaos Test Flow - Used for Experiment 4 (Custom chaos flag). When DDB chaos flag is enabled, the LexFulfillmentHandler Lambda returns Failed state to Lex, which returns Failure response. This flow routes failed calls to a queue with no available agents, producing MissedCalls metric."
+  },
+  "Actions": [
+    {
+      "Identifier": "entry-point",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Welcome. Let me look up your information."
+      },
+      "Transitions": {
+        "NextAction": "get-customer-input",
+        "Errors": [
+          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"}
+        ]
+      }
+    },
+    {
+      "Identifier": "get-customer-input",
+      "Type": "ConnectParticipantWithLexBot",
+      "Parameters": {
+        "LexV2Bot": {
+          "AliasArn": "PLACEHOLDER_LEX_BOT_ALIAS_ARN"
+        }
+      },
+      "Transitions": {
+        "NextAction": "success-path",
+        "Conditions": [
+          {
+            "NextAction": "success-path",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": ["LookupCustomer"]
+            }
+          },
+          {
+            "NextAction": "success-path",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": ["CheckOrderStatus"]
+            }
+          }
+        ],
+        "Errors": [
+          {
+            "NextAction": "chaos-error-path",
+            "ErrorType": "NoMatchingError"
+          },
+          {
+            "NextAction": "chaos-error-path",
+            "ErrorType": "NoMatchingCondition"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "success-path",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "I've found your information. Transferring you to an available agent."
+      },
+      "Transitions": {
+        "NextAction": "transfer-to-main-queue",
+        "Errors": [
+          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"}
+        ]
+      }
+    },
+    {
+      "Identifier": "chaos-error-path",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "I'm sorry, I wasn't able to process your request. Please hold while I find an agent."
+      },
+      "Transitions": {
+        "NextAction": "transfer-to-overflow-queue",
+        "Errors": [
+          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"}
+        ]
+      }
+    },
+    {
+      "Identifier": "transfer-to-main-queue",
+      "Type": "TransferContactToQueue",
+      "Parameters": {
+        "QueueId": "PLACEHOLDER_MAIN_QUEUE_ID"
+      },
+      "Transitions": {
+        "NextAction": "end-contact",
+        "Errors": [
+          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"}
+        ]
+      }
+    },
+    {
+      "Identifier": "transfer-to-overflow-queue",
+      "Type": "TransferContactToQueue",
+      "Parameters": {
+        "QueueId": "PLACEHOLDER_OVERFLOW_QUEUE_ID"
+      },
+      "Transitions": {
+        "NextAction": "end-contact",
+        "Errors": [
+          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"},
+          {"NextAction": "error-disconnect", "ErrorType": "QueueAtCapacity"}
+        ]
+      }
+    },
+    {
+      "Identifier": "error-disconnect",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "We apologize for the inconvenience. Please try again later. Goodbye."
+      },
+      "Transitions": {
+        "NextAction": "end-contact",
+        "Errors": [
+          {"NextAction": "end-contact", "ErrorType": "NoMatchingError"}
+        ]
+      }
+    },
+    {
+      "Identifier": "end-contact",
+      "Type": "DisconnectParticipant",
+      "Parameters": {},
+      "Transitions": {}
+    }
+  ]
+}

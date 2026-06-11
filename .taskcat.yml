@@ -1,0 +1,63 @@
+---
+# taskcat configuration for connect-fis-acgr-sample.
+#
+# Note: This sample requires several pre-existing resources that taskcat cannot
+# bootstrap (Connect instance with ACGR enabled, Traffic Distribution Group,
+# VPC subnets, FIS extension layer ARN, Lambda code bucket). taskcat is used
+# here for SCHEMA validation — verifying parameters resolve and the template
+# parses across regions. Real end-to-end test requires the prerequisites listed
+# in README.md.
+#
+# Usage:
+#   pip install taskcat
+#   # Update parameters below to point at your sandbox account's resources
+#   taskcat test run --no-delete   # keeps stacks for inspection
+#   taskcat test clean ALL          # tears down
+
+project:
+  name: connect-fis-acgr-sample
+  package_lambda: false
+  regions:
+    - us-east-1
+    - us-west-2
+
+tests:
+  primary-region:
+    template: cfn/main-template.yaml
+    regions:
+      - us-east-1
+    parameters:
+      ConnectInstanceArn: $[taskcat_ssm_/taskcat/connect/instance_arn_iad]
+      ConnectInstanceId: $[taskcat_ssm_/taskcat/connect/instance_id_iad]
+      PrimaryRegion: us-east-1
+      PairedRegion: us-west-2
+      TrafficDistributionGroupId: $[taskcat_ssm_/taskcat/connect/tdg_id]
+      EnableAutoFailover: 'true'
+      EnableLexGlobalResiliency: 'true'
+      DashboardType: regional
+      LambdaSubnetIdA: $[taskcat_ssm_/taskcat/vpc/subnet_a_iad]
+      LambdaSubnetIdB: $[taskcat_ssm_/taskcat/vpc/subnet_b_iad]
+      LambdaSecurityGroupId: $[taskcat_ssm_/taskcat/vpc/sg_iad]
+      LambdaCodeBucket: $[taskcat_ssm_/taskcat/code/bucket_iad]
+      FISExtensionLayerArn: $[taskcat_ssm_/taskcat/fis/layer_iad]
+
+  paired-region:
+    template: cfn/main-template.yaml
+    regions:
+      - us-west-2
+    parameters:
+      ConnectInstanceArn: $[taskcat_ssm_/taskcat/connect/instance_arn_pdx]
+      ConnectInstanceId: $[taskcat_ssm_/taskcat/connect/instance_id_pdx]
+      PrimaryRegion: us-east-1
+      PairedRegion: us-west-2
+      TrafficDistributionGroupId: $[taskcat_ssm_/taskcat/connect/tdg_id]
+      EnableAutoFailover: 'true'
+      EnableLexGlobalResiliency: 'true'
+      DashboardType: regional
+      LambdaSubnetIdA: $[taskcat_ssm_/taskcat/vpc/subnet_a_pdx]
+      LambdaSubnetIdB: $[taskcat_ssm_/taskcat/vpc/subnet_b_pdx]
+      LambdaSecurityGroupId: $[taskcat_ssm_/taskcat/vpc/sg_pdx]
+      LambdaCodeBucket: $[taskcat_ssm_/taskcat/code/bucket_pdx]
+      FISExtensionLayerArn: $[taskcat_ssm_/taskcat/fis/layer_pdx]
+      ReplicatedLexBotId: $[taskcat_ssm_/taskcat/lex/bot_id]
+      ReplicatedLexBotAliasId: $[taskcat_ssm_/taskcat/lex/alias_id]
