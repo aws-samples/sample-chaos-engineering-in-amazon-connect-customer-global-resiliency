@@ -158,32 +158,85 @@ aws s3 cp lex_fulfillment_handler.zip s3://YOUR-BUCKET-NAME/connect-chaos/ --reg
 aws s3 cp traffic_shift_handler.zip s3://YOUR-BUCKET-NAME/connect-chaos/ --region us-east-1
 ```
 
-### Step 2: Deploy via StackSet (Recommended)
+### Step 2: Collect deployment parameter values
+
+Before running the deploy command, gather these values from your account. Replace `<your-instance-alias>`, `<your-bucket-iad>`, etc. with values from your environment. The shell variables defined here are referenced by the deploy commands in Step 3.
+
+```bash
+# Region pair (one of: us-east-1/us-west-2, eu-west-2/eu-central-1, ap-northeast-1/ap-northeast-3)
+PRIMARY_REGION=us-east-1
+PAIRED_REGION=us-west-2
+
+# Your AWS account ID
+ACCT=$(aws sts get-caller-identity --query Account --output text)
+
+# Connect instance ARN and ID — primary region
+PRIMARY_INSTANCE_ARN=$(aws connect list-instances --region $PRIMARY_REGION \
+  --query "InstanceSummaryList[?InstanceAlias=='<your-instance-alias>'].Arn | [0]" --output text)
+PRIMARY_INSTANCE_ID=$(echo $PRIMARY_INSTANCE_ARN | awk -F/ '{print $NF}')
+
+# Connect instance ARN and ID — paired region (auto-created by ACGR replication)
+PAIRED_INSTANCE_ARN=$(aws connect list-instances --region $PAIRED_REGION \
+  --query "InstanceSummaryList[?InstanceAlias=='<your-instance-alias>'].Arn | [0]" --output text)
+PAIRED_INSTANCE_ID=$(echo $PAIRED_INSTANCE_ARN | awk -F/ '{print $NF}')
+
+# Traffic Distribution Group (created during ACGR onboarding)
+TDG_ID=$(aws connect list-traffic-distribution-groups \
+  --instance-id $PRIMARY_INSTANCE_ID --region $PRIMARY_REGION \
+  --query "TrafficDistributionGroupSummaryList[0].Id" --output text)
+```
+
+Look up the remaining values manually:
+
+| Variable | Where to find it |
+|---|---|
+| `LAMBDA_SUBNET_A_IAD`, `LAMBDA_SUBNET_B_IAD` | Two private subnets in your VPC in the primary region (Experiment 2 disrupts both for deterministic blast radius) |
+| `LAMBDA_SUBNET_A_PDX`, `LAMBDA_SUBNET_B_PDX` | Same, in the paired region |
+| `LAMBDA_SG_IAD`, `LAMBDA_SG_PDX` | Security group ID per region for the Lambda VPC config |
+| `LAMBDA_BUCKET_IAD`, `LAMBDA_BUCKET_PDX` | The bucket in each region where you uploaded the zips in Step 1 |
+| `FIS_LAYER_IAD`, `FIS_LAYER_PDX` | FIS Lambda extension layer ARN per region — see the [per-region catalog](https://docs.aws.amazon.com/fis/latest/userguide/actions-lambda-extension-arns.html) |
+
+```bash
+LAMBDA_SUBNET_A_IAD=<subnet-id>
+LAMBDA_SUBNET_B_IAD=<subnet-id>
+LAMBDA_SG_IAD=<sg-id>
+LAMBDA_BUCKET_IAD=<your-bucket-iad>
+FIS_LAYER_IAD=<fis-extension-layer-arn-iad>
+
+LAMBDA_SUBNET_A_PDX=<subnet-id>
+LAMBDA_SUBNET_B_PDX=<subnet-id>
+LAMBDA_SG_PDX=<sg-id>
+LAMBDA_BUCKET_PDX=<your-bucket-pdx>
+FIS_LAYER_PDX=<fis-extension-layer-arn-pdx>
+```
+
+### Step 3: Deploy via StackSet (Recommended)
+
+The top-level `--parameters` carry the **primary region's** values. The paired region's values are supplied via `--parameter-overrides` on `create-stack-instances`.
 
 ```bash
 aws cloudformation create-stack-set \
   --stack-set-name connect-chaos-sample \
   --template-body file://cfn/main-template.yaml \
   --parameters \
-    ParameterKey=ConnectInstanceArn,ParameterValue=arn:aws:connect:us-east-1:123456789012:instance/abc-123 \
-    ParameterKey=ConnectInstanceId,ParameterValue=abc-123 \
-    ParameterKey=PrimaryRegion,ParameterValue=us-east-1 \
-    ParameterKey=PairedRegion,ParameterValue=us-west-2 \
-    ParameterKey=TrafficDistributionGroupId,ParameterValue=tdg-xyz \
+    ParameterKey=ConnectInstanceArn,ParameterValue=$PRIMARY_INSTANCE_ARN \
+    ParameterKey=ConnectInstanceId,ParameterValue=$PRIMARY_INSTANCE_ID \
+    ParameterKey=PrimaryRegion,ParameterValue=$PRIMARY_REGION \
+    ParameterKey=PairedRegion,ParameterValue=$PAIRED_REGION \
+    ParameterKey=TrafficDistributionGroupId,ParameterValue=$TDG_ID \
     ParameterKey=EnableAutoFailover,ParameterValue=true \
     ParameterKey=DashboardType,ParameterValue=regional \
-    ParameterKey=LambdaSubnetIdA,ParameterValue=subnet-aaa \
-    ParameterKey=LambdaSubnetIdB,ParameterValue=subnet-bbb \
-    ParameterKey=LambdaSecurityGroupId,ParameterValue=sg-ccc \
-    ParameterKey=LambdaCodeBucket,ParameterValue=YOUR-BUCKET-NAME \
-    ParameterKey=FISExtensionLayerArn,ParameterValue=arn:aws:lambda:us-east-1:123456789012:layer:aws-fis-extension:1 \
+    ParameterKey=LambdaSubnetIdA,ParameterValue=$LAMBDA_SUBNET_A_IAD \
+    ParameterKey=LambdaSubnetIdB,ParameterValue=$LAMBDA_SUBNET_B_IAD \
+    ParameterKey=LambdaSecurityGroupId,ParameterValue=$LAMBDA_SG_IAD \
+    ParameterKey=LambdaCodeBucket,ParameterValue=$LAMBDA_BUCKET_IAD \
+    ParameterKey=FISExtensionLayerArn,ParameterValue=$FIS_LAYER_IAD \
     ParameterKey=EnableLexGlobalResiliency,ParameterValue=true \
   --capabilities CAPABILITY_NAMED_IAM \
   --permission-model SELF_MANAGED
 
-# After the PRIMARY stack reaches CREATE_COMPLETE, read the Lex IDs that Lex GR
-# will preserve in the paired region:
-PRIMARY_REGION=us-east-1
+# Wait for the PRIMARY stack to reach CREATE_COMPLETE, then read the Lex IDs
+# that Lex Global Resiliency preserves in the paired region:
 LEX_BOT_ID=$(aws cloudformation describe-stacks \
   --stack-name connect-chaos-sample --region $PRIMARY_REGION \
   --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue" --output text)
@@ -191,20 +244,20 @@ LEX_BOT_ALIAS_ID=$(aws cloudformation describe-stacks \
   --stack-name connect-chaos-sample --region $PRIMARY_REGION \
   --query "Stacks[0].Outputs[?OutputKey=='LexBotAliasId'].OutputValue" --output text)
 
-# Then pass them as ParameterOverrides for the paired-region stack instance:
+# Paired-region values are supplied as ParameterOverrides:
 aws cloudformation create-stack-instances \
   --stack-set-name connect-chaos-sample \
-  --accounts 123456789012 \
-  --regions us-east-1 us-west-2 \
+  --accounts $ACCT \
+  --regions $PRIMARY_REGION $PAIRED_REGION \
   --parameter-overrides \
     "[
-      {\"ParameterKey\":\"ConnectInstanceArn\",\"ParameterValue\":\"arn:aws:connect:us-west-2:123456789012:instance/def-456\"},
-      {\"ParameterKey\":\"ConnectInstanceId\",\"ParameterValue\":\"def-456\"},
-      {\"ParameterKey\":\"LambdaSubnetIdA\",\"ParameterValue\":\"subnet-ddd\"},
-      {\"ParameterKey\":\"LambdaSubnetIdB\",\"ParameterValue\":\"subnet-eee\"},
-      {\"ParameterKey\":\"LambdaSecurityGroupId\",\"ParameterValue\":\"sg-fff\"},
-      {\"ParameterKey\":\"LambdaCodeBucket\",\"ParameterValue\":\"YOUR-BUCKET-PDX\"},
-      {\"ParameterKey\":\"FISExtensionLayerArn\",\"ParameterValue\":\"arn:aws:lambda:us-west-2:123456789012:layer:aws-fis-extension:1\"},
+      {\"ParameterKey\":\"ConnectInstanceArn\",\"ParameterValue\":\"$PAIRED_INSTANCE_ARN\"},
+      {\"ParameterKey\":\"ConnectInstanceId\",\"ParameterValue\":\"$PAIRED_INSTANCE_ID\"},
+      {\"ParameterKey\":\"LambdaSubnetIdA\",\"ParameterValue\":\"$LAMBDA_SUBNET_A_PDX\"},
+      {\"ParameterKey\":\"LambdaSubnetIdB\",\"ParameterValue\":\"$LAMBDA_SUBNET_B_PDX\"},
+      {\"ParameterKey\":\"LambdaSecurityGroupId\",\"ParameterValue\":\"$LAMBDA_SG_PDX\"},
+      {\"ParameterKey\":\"LambdaCodeBucket\",\"ParameterValue\":\"$LAMBDA_BUCKET_PDX\"},
+      {\"ParameterKey\":\"FISExtensionLayerArn\",\"ParameterValue\":\"$FIS_LAYER_PDX\"},
       {\"ParameterKey\":\"ReplicatedLexBotId\",\"ParameterValue\":\"$LEX_BOT_ID\"},
       {\"ParameterKey\":\"ReplicatedLexBotAliasId\",\"ParameterValue\":\"$LEX_BOT_ALIAS_ID\"}
     ]" \
@@ -213,29 +266,30 @@ aws cloudformation create-stack-instances \
 
 ### Alternative: Deploy Individually Per Region
 
+If you prefer not to use a StackSet, deploy the same template twice with `aws cloudformation deploy`. The variable names are identical to the section above.
+
 ```bash
-# Primary region (deploys Lex bot with Global Resiliency replication to paired region)
+# Primary region (creates the Lex bot; Global Resiliency replicates it to paired)
 aws cloudformation deploy \
   --template-file cfn/main-template.yaml \
   --stack-name connect-chaos-sample \
   --parameter-overrides \
-    ConnectInstanceArn=arn:aws:connect:us-east-1:123456789012:instance/abc-123 \
-    ConnectInstanceId=abc-123 \
-    PrimaryRegion=us-east-1 \
-    PairedRegion=us-west-2 \
-    TrafficDistributionGroupId=tdg-xyz \
+    ConnectInstanceArn=$PRIMARY_INSTANCE_ARN \
+    ConnectInstanceId=$PRIMARY_INSTANCE_ID \
+    PrimaryRegion=$PRIMARY_REGION \
+    PairedRegion=$PAIRED_REGION \
+    TrafficDistributionGroupId=$TDG_ID \
     EnableAutoFailover=true \
-    LambdaSubnetIdA=subnet-aaa \
-    LambdaSubnetIdB=subnet-bbb \
-    LambdaSecurityGroupId=sg-ccc \
-    LambdaCodeBucket=YOUR-BUCKET-NAME \
-    FISExtensionLayerArn=arn:aws:lambda:us-east-1:123456789012:layer:aws-fis-extension:1 \
+    LambdaSubnetIdA=$LAMBDA_SUBNET_A_IAD \
+    LambdaSubnetIdB=$LAMBDA_SUBNET_B_IAD \
+    LambdaSecurityGroupId=$LAMBDA_SG_IAD \
+    LambdaCodeBucket=$LAMBDA_BUCKET_IAD \
+    FISExtensionLayerArn=$FIS_LAYER_IAD \
     EnableLexGlobalResiliency=true \
   --capabilities CAPABILITY_NAMED_IAM \
-  --region us-east-1
+  --region $PRIMARY_REGION
 
 # Read Lex bot IDs from primary stack outputs (Lex GR preserves these in the replica)
-PRIMARY_REGION=us-east-1
 LEX_BOT_ID=$(aws cloudformation describe-stacks \
   --stack-name connect-chaos-sample --region $PRIMARY_REGION \
   --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue" --output text)
@@ -243,32 +297,32 @@ LEX_BOT_ALIAS_ID=$(aws cloudformation describe-stacks \
   --stack-name connect-chaos-sample --region $PRIMARY_REGION \
   --query "Stacks[0].Outputs[?OutputKey=='LexBotAliasId'].OutputValue" --output text)
 
-# Paired region (imports replicated Lex bot IDs — does NOT create a new bot)
+# Paired region (imports the replicated Lex bot — does NOT create a new bot)
 aws cloudformation deploy \
   --template-file cfn/main-template.yaml \
   --stack-name connect-chaos-sample \
   --parameter-overrides \
-    ConnectInstanceArn=arn:aws:connect:us-west-2:123456789012:instance/def-456 \
-    ConnectInstanceId=def-456 \
-    PrimaryRegion=us-east-1 \
-    PairedRegion=us-west-2 \
-    TrafficDistributionGroupId=tdg-xyz \
+    ConnectInstanceArn=$PAIRED_INSTANCE_ARN \
+    ConnectInstanceId=$PAIRED_INSTANCE_ID \
+    PrimaryRegion=$PRIMARY_REGION \
+    PairedRegion=$PAIRED_REGION \
+    TrafficDistributionGroupId=$TDG_ID \
     EnableAutoFailover=true \
-    LambdaSubnetIdA=subnet-ddd \
-    LambdaSubnetIdB=subnet-eee \
-    LambdaSecurityGroupId=sg-fff \
-    LambdaCodeBucket=YOUR-BUCKET-PDX \
-    FISExtensionLayerArn=arn:aws:lambda:us-west-2:123456789012:layer:aws-fis-extension:1 \
+    LambdaSubnetIdA=$LAMBDA_SUBNET_A_PDX \
+    LambdaSubnetIdB=$LAMBDA_SUBNET_B_PDX \
+    LambdaSecurityGroupId=$LAMBDA_SG_PDX \
+    LambdaCodeBucket=$LAMBDA_BUCKET_PDX \
+    FISExtensionLayerArn=$FIS_LAYER_PDX \
     EnableLexGlobalResiliency=true \
     ReplicatedLexBotId=$LEX_BOT_ID \
     ReplicatedLexBotAliasId=$LEX_BOT_ALIAS_ID \
   --capabilities CAPABILITY_NAMED_IAM \
-  --region us-west-2
+  --region $PAIRED_REGION
 ```
 
-> **Note (Tokyo/Osaka pair):** Lex Global Resiliency is not available for `ap-northeast-1`↔`ap-northeast-3`. For that pair, set `EnableLexGlobalResiliency=false` and deploy the Lex bot independently in each region (omit the `ReplicatedLexBot*` parameters).
+> **Note (Tokyo/Osaka pair):** Lex Global Resiliency is not available for `ap-northeast-1`↔`ap-northeast-3`. For that pair, set `EnableLexGlobalResiliency=false` and deploy the Lex bot independently in each region (omit the `ReplicatedLexBot*` parameters), then run `scripts/wire-paired-flow.sh` to point the paired-region contact flow at its independent Lex alias.
 
-### Step 3: Seed DynamoDB with Test Data
+### Step 4: Seed DynamoDB with Test Data
 
 ```bash
 aws dynamodb put-item \
