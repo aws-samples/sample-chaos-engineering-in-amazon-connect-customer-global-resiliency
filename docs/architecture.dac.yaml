@@ -1,0 +1,242 @@
+# Source for docs/architecture.png — render with the AWS Diagram-as-Code CLI:
+#   awsdac docs/architecture.dac.yaml --output docs/architecture.png
+#
+# Reflects the shipping template: ACGR-paired primary/paired regions, Lex
+# Global Resiliency as the default cross-region bot replication, a per-region
+# FIS config bucket feeding the FIS Lambda extension, four chaos experiments
+# each mapped to a distinct alarm, a composite alarm, and the EventBridge ->
+# TrafficShiftHandler -> UpdateTrafficDistribution failover path.
+
+Diagram:
+  DefinitionFiles:
+    - Type: URL
+      Url: https://raw.githubusercontent.com/awslabs/diagram-as-code/main/definitions/definition-for-aws-icons-light.yaml
+
+  Resources:
+    Canvas:
+      Type: AWS::Diagram::Canvas
+      Direction: vertical
+      Children: [Caller, AWSCloud]
+
+    Caller:
+      Type: AWS::Diagram::Resource
+      Preset: User
+      Title: "Customer (PSTN call)"
+
+    AWSCloud:
+      Type: AWS::Diagram::Cloud
+      Preset: AWSCloudNoLogo
+      Direction: vertical
+      Children: [TDG, RegionsRow, Failover]
+
+    TDG:
+      Type: AWS::Connect::Instance
+      Title: "Traffic Distribution Group (ACGR)"
+
+    RegionsRow:
+      Type: AWS::Diagram::HorizontalStack
+      Children: [PrimaryRegion, PairedRegion]
+
+    PrimaryRegion:
+      Type: AWS::Diagram::Resource
+      Preset: Generic group
+      Title: "Primary Region"
+      Direction: vertical
+      Children: [PrimaryConnect, PrimaryLex, PrimaryLambda, PrimaryFISBucket, PrimaryFIS, PrimaryDDB, PrimaryAlarms, PrimaryComposite]
+
+    PrimaryConnect:
+      Type: AWS::Connect::Instance
+      Title: "Connect + Contact Flows"
+    PrimaryLex:
+      Type: AWS::Lex::Bot
+      Title: "Lex V2 Bot"
+    PrimaryLambda:
+      Type: AWS::Lambda::Function
+      Title: "LexFulfillmentHandler (FIS extension)"
+    PrimaryFISBucket:
+      Type: AWS::S3::Bucket
+      Title: "FIS config bucket"
+    PrimaryFIS:
+      Type: AWS::Lambda::Function
+      Title: "3 FIS experiments"
+    PrimaryDDB:
+      Type: AWS::DynamoDB::Table
+      Title: "Customers + ChaosConfig (Global)"
+    PrimaryAlarms:
+      Type: AWS::CloudWatch::Alarm
+      Title: "4 component alarms"
+    PrimaryComposite:
+      Type: AWS::CloudWatch::Alarm
+      Title: "Composite alarm"
+
+    PairedRegion:
+      Type: AWS::Diagram::Resource
+      Preset: Generic group
+      Title: "Paired Region"
+      Direction: vertical
+      Children: [PairedConnect, PairedLex, PairedLambda, PairedFISBucket, PairedFIS, PairedDDB, PairedAlarms, PairedComposite]
+
+    PairedConnect:
+      Type: AWS::Connect::Instance
+      Title: "Connect (ACGR replica) + Flows"
+    PairedLex:
+      Type: AWS::Lex::Bot
+      Title: "Lex V2 Bot (Lex GR replica)"
+    PairedLambda:
+      Type: AWS::Lambda::Function
+      Title: "LexFulfillmentHandler (FIS extension)"
+    PairedFISBucket:
+      Type: AWS::S3::Bucket
+      Title: "FIS config bucket"
+    PairedFIS:
+      Type: AWS::Lambda::Function
+      Title: "3 FIS experiments"
+    PairedDDB:
+      Type: AWS::DynamoDB::Table
+      Title: "Customers + ChaosConfig (Global)"
+    PairedAlarms:
+      Type: AWS::CloudWatch::Alarm
+      Title: "4 component alarms"
+    PairedComposite:
+      Type: AWS::CloudWatch::Alarm
+      Title: "Composite alarm"
+
+    Failover:
+      Type: AWS::Diagram::HorizontalStack
+      Children: [EventRule, TrafficShift]
+
+    EventRule:
+      Type: AWS::Events::Rule
+      Title: "EventBridge failover rule"
+    TrafficShift:
+      Type: AWS::Lambda::Function
+      Title: "TrafficShiftHandler"
+
+  Links:
+    - Source: Caller
+      SourcePosition: S
+      Target: TDG
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+      Labels: { SourceRight: { Title: Inbound call } }
+    - Source: TDG
+      SourcePosition: SSW
+      Target: PrimaryConnect
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+      Type: orthogonal
+      Labels: { TargetLeft: { Title: 100% normal } }
+    - Source: TDG
+      SourcePosition: SSE
+      Target: PairedConnect
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+      Type: orthogonal
+      Labels: { TargetRight: { Title: 100% on failover } }
+    - Source: PrimaryConnect
+      SourcePosition: S
+      Target: PrimaryLex
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+    - Source: PrimaryLex
+      SourcePosition: S
+      Target: PrimaryLambda
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+    - Source: PrimaryLambda
+      SourcePosition: S
+      Target: PrimaryDDB
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+    - Source: PrimaryFIS
+      SourcePosition: W
+      Target: PrimaryFISBucket
+      TargetPosition: E
+      TargetArrowHead: { Type: Open }
+      Labels: { SourceLeft: { Title: writes fault config } }
+    - Source: PrimaryFISBucket
+      SourcePosition: N
+      Target: PrimaryLambda
+      TargetPosition: S
+      TargetArrowHead: { Type: Open }
+      Type: orthogonal
+      Labels: { SourceLeft: { Title: extension polls } }
+    - Source: PrimaryAlarms
+      SourcePosition: S
+      Target: PrimaryComposite
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+      Labels: { SourceLeft: { Title: OR } }
+    - Source: PairedConnect
+      SourcePosition: S
+      Target: PairedLex
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+    - Source: PairedLex
+      SourcePosition: S
+      Target: PairedLambda
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+    - Source: PairedLambda
+      SourcePosition: S
+      Target: PairedDDB
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+    - Source: PairedFIS
+      SourcePosition: W
+      Target: PairedFISBucket
+      TargetPosition: E
+      TargetArrowHead: { Type: Open }
+    - Source: PairedFISBucket
+      SourcePosition: N
+      Target: PairedLambda
+      TargetPosition: S
+      TargetArrowHead: { Type: Open }
+      Type: orthogonal
+    - Source: PairedAlarms
+      SourcePosition: S
+      Target: PairedComposite
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+    - Source: PrimaryDDB
+      SourcePosition: E
+      Target: PairedDDB
+      TargetPosition: W
+      LineStyle: dashed
+      Labels: { SourceRight: { Title: Global Table } }
+    - Source: PrimaryLex
+      SourcePosition: E
+      Target: PairedLex
+      TargetPosition: W
+      LineStyle: dashed
+      Labels: { SourceRight: { Title: Lex GR } }
+    - Source: PrimaryConnect
+      SourcePosition: E
+      Target: PairedConnect
+      TargetPosition: W
+      LineStyle: dashed
+      Labels: { SourceRight: { Title: ACGR replicates flows } }
+    - Source: PrimaryComposite
+      SourcePosition: S
+      Target: EventRule
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+      Type: orthogonal
+    - Source: PairedComposite
+      SourcePosition: S
+      Target: EventRule
+      TargetPosition: N
+      TargetArrowHead: { Type: Open }
+      Type: orthogonal
+    - Source: EventRule
+      SourcePosition: E
+      Target: TrafficShift
+      TargetPosition: W
+      TargetArrowHead: { Type: Open }
+    - Source: TrafficShift
+      SourcePosition: N
+      Target: TDG
+      TargetPosition: S
+      TargetArrowHead: { Type: Open }
+      Type: orthogonal
+      Labels: { TargetRight: { Title: UpdateTrafficDistribution } }

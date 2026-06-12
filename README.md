@@ -141,6 +141,34 @@ After the FIS experiment ends and metrics return to normal:
 
 ---
 
+## Parameters
+
+| Parameter | Required | Default | Notes |
+|-----------|:---:|---|---|
+| `ConnectInstanceArn` | ✓ | — | ACGR-enabled Connect instance ARN for **this** region |
+| `ConnectInstanceId` | ✓ | — | Connect instance UUID for **this** region |
+| `TrafficDistributionGroupId` | ✓ | — | TDG that ACGR failover updates |
+| `LambdaSubnetIdA` | ✓ | — | First Lambda VPC subnet (also targeted by Experiment 2) |
+| `LambdaSubnetIdB` | ✓ | — | Second Lambda VPC subnet (also targeted by Experiment 2) |
+| `LambdaSecurityGroupId` | ✓ | — | Security group for the Lambda VPC config |
+| `LambdaCodeBucket` | ✓ | — | Pre-existing S3 bucket holding the Lambda `.zip` packages (under `connect-chaos/`) |
+| `FISExtensionLayerArn` | ✓ | — | AWS FIS Lambda extension layer ARN for this region |
+| `PrimaryRegion` | | `us-east-1` | Must form an ACGR-supported pair with `PairedRegion` (enforced by the template `Rules` block) |
+| `PairedRegion` | | `us-west-2` | — |
+| `EnableAutoFailover` | | `false` | Deploy the EventBridge rule + `TrafficShiftHandler` Lambda |
+| `EnableLexGlobalResiliency` | | `true` | Replicate the Lex bot via Lex GR (IAD↔PDX, LDN↔FRA). Set `false` for Tokyo↔Osaka |
+| `ReplicatedLexBotId` | | `''` | Paired region only — `LexBotId` output from the primary stack |
+| `ReplicatedLexBotAliasId` | | `''` | Paired region only — `LexBotAliasId` output from the primary stack |
+| `PairedConnectInstanceId` | | `''` | Primary region only, when `DashboardType=unified` |
+| `DashboardType` | | `regional` | `regional` (per-region) or `unified` (cross-region in primary) |
+| `EnableTrafficGenerator` | | `false` | Deploy the optional synthetic-traffic Lambda |
+| `ContactFlowErrorsThreshold` | | `5` | Experiment 2 alarm threshold |
+| `RuntimeLambdaErrorsThreshold` | | `3` | Experiment 3 alarm threshold |
+| `MissedCallsThreshold` | | `5` | Experiment 4 alarm threshold |
+| `FISExperimentDuration` | | `PT5M` | ISO-8601 duration for FIS experiments 1–3 |
+
+---
+
 ## Deployment
 
 This template is designed for **CloudFormation StackSets** — a single template deployed to both the primary and paired regions. The `IsPrimaryRegion` condition controls what deploys where.
