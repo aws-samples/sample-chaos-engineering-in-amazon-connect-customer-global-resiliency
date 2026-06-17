@@ -30,8 +30,8 @@ Diagram:
       Children: [TDG, RegionsRow, Failover]
 
     TDG:
-      Type: AWS::Connect::Instance
-      Title: "Traffic Distribution Group (ACGR)"
+      Type: AWS::Connect
+      Title: "ACGR Traffic Distribution"
 
     RegionsRow:
       Type: AWS::Diagram::HorizontalStack
@@ -239,4 +239,4 @@ Diagram:
       TargetPosition: S
       TargetArrowHead: { Type: Open }
       Type: orthogonal
-      Labels: { TargetRight: { Title: UpdateTrafficDistribution } }
+      Labels: { SourceRight: { Title: "Update TDG" } }
