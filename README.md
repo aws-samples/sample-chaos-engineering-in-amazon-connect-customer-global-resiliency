@@ -373,7 +373,7 @@ aws dynamodb put-item \
 aws fis start-experiment \
   --experiment-template-id $(aws cloudformation describe-stacks \
     --stack-name connect-chaos-sample \
-    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment1Id`].OutputValue' \
+    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment1`].OutputValue' \
     --output text --region us-east-1) \
   --region us-east-1
 ```
@@ -383,7 +383,7 @@ aws fis start-experiment \
 aws fis start-experiment \
   --experiment-template-id $(aws cloudformation describe-stacks \
     --stack-name connect-chaos-sample \
-    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment2Id`].OutputValue' \
+    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment2`].OutputValue' \
     --output text --region us-east-1) \
   --region us-east-1
 ```
@@ -393,7 +393,7 @@ aws fis start-experiment \
 aws fis start-experiment \
   --experiment-template-id $(aws cloudformation describe-stacks \
     --stack-name connect-chaos-sample \
-    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment3Id`].OutputValue' \
+    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment3`].OutputValue' \
     --output text --region us-east-1) \
   --region us-east-1
 ```
@@ -529,7 +529,7 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 ### Important Considerations
 
 - **This is a sample for testing/demonstration only.** Do NOT run FIS experiments against production contact centers without thorough planning and blast-radius controls.
-- **FIS stop conditions** are configured on all experiments — if the composite alarm fires, experiments auto-stop.
+- **FIS stop conditions** are configured on all experiments — each experiment auto-stops if its own component alarm fires.
 - **IAM roles** are scoped to the minimum required permissions. Review them before deploying.
 - **VPC Lambda** is used for network-level experiments (Experiment 2). Ensure your security group allows outbound access to DynamoDB and CloudWatch endpoints.
 - **FIS extension layer** has access to S3 configuration — the S3 bucket is restricted to the FIS execution role and Lambda execution role only.
