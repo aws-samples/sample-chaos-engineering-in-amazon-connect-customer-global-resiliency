@@ -55,7 +55,7 @@ Each experiment targets a **distinct component** and monitors a **distinct Cloud
 |---|-----------|-----------|-------------------|-----------:|
 | **1** | Lambda | `aws:lambda:invocation-error` | `Errors` | AWS/Lambda |
 | **2** | DynamoDB | `aws:network:disrupt-connectivity` scope=dynamodb | `ContactFlowErrors` | AWS/Connect |
-| **3** | Lex | `aws:lambda:invocation-add-delay` (> timeout) | `RuntimeLambdaErrors` | AWS/Lex |
+| **3** | Lex code hook | `aws:lambda:invocation-add-delay` (~31s) | `Duration` (code-hook latency) | AWS/Lambda |
 | **4** | Contact Flow | Custom (DDB chaos flag → Lex returns Failed) | `MissedCalls` | AWS/Connect |
 
 ### Experiment Details
@@ -67,16 +67,16 @@ Each experiment targets a **distinct component** and monitors a **distinct Cloud
 - **Alarm:** `ConnectChaos-Lambda-Errors-{region}` (threshold: >5 errors/min)
 
 #### Experiment 2: DynamoDB Network Disruption
-- **What:** FIS blocks network connectivity from Lambda's VPC subnet to DynamoDB
+- **What:** FIS blocks network connectivity from the Lambda VPC subnets to DynamoDB
 - **How:** `aws:network:disrupt-connectivity` with `scope: dynamodb`
-- **Effect:** Lambda executes but throws ClientError → Lex returns error → Contact flow takes Error branch → `ContactFlowErrors` metric fires
-- **Alarm:** `ConnectChaos-ContactFlow-Errors-{region}` (threshold: >5 errors/min)
+- **Effect:** the first block of the contact flow invokes the **call-logger Lambda directly** (an "Invoke AWS Lambda function" block) to persist the inbound contact to the `ConnectChaosCallLog` DynamoDB table. With DynamoDB unreachable, that Lambda's `put_item` raises within ~2s, Connect routes the contact down the block's **Error branch**, and `ContactFlowErrors` fires.
+- **Alarm:** `ConnectChaos-ContactFlow-Errors-{region}` (threshold: `>ContactFlowErrorsThreshold`, default 5 — lower it for single-call demos)
 
-#### Experiment 3: Lex Code Hook Timeout
-- **What:** FIS injects 15s delay into Lambda startup (timeout is 8s) → Lex code hook times out
-- **How:** `aws:lambda:invocation-add-delay` with `startupDelayMilliseconds: 15000`
-- **Effect:** Lex detects code hook timeout → emits `RuntimeLambdaErrors` in AWS/Lex namespace
-- **Alarm:** `ConnectChaos-Lex-RuntimeLambdaErrors-{region}` (threshold: >3 errors/min)
+#### Experiment 3: Lex Code Hook Latency
+- **What:** FIS injects a ~31s startup delay into the Lex fulfillment Lambda so the code hook becomes pathologically slow
+- **How:** `aws:lambda:invocation-add-delay` with `startupDelayMilliseconds: 31000` (the Lambda timeout is raised to 40s so it still returns rather than erroring)
+- **Effect:** `LexFulfillmentHandler` Duration spikes to ~31s on every call
+- **Alarm:** `ConnectChaos-Lex-CodeHookLatency-{region}` — `AWS/Lambda` `Duration` (Maximum) `> LexCodeHookLatencyThresholdMs` (default 7000 ms)
 
 #### Experiment 4: Contact Flow Logic Failure (Custom)
 - **What:** A DynamoDB chaos flag (`chaos_enabled=true`) causes Lambda to return `Failed` state to Lex
@@ -115,9 +115,11 @@ After the FIS experiment ends and metrics return to normal:
 | Contact Flow — Chaos Test | ✓ | ✓ | ACGR auto-replicates |
 | Lex V2 Bot + Alias | ✓ | ✓ | StackSet (independent per region) |
 | Lambda — `LexFulfillmentHandler` | ✓ | ✓ | StackSet |
+| Lambda — `ConnectChaos-CallLogger` | ✓ | ✓ | StackSet (direct flow invoke: logs inbound call → also drives Exp 2 `ContactFlowErrors`) |
 | Lambda — `TrafficShiftHandler` | ✓ | ✓ | StackSet (requires `EnableAutoFailover=true`) |
 | DynamoDB — `ConnectChaosCustomers` | ✓ | ✓ | Global Table (create in primary, auto-replicates) |
 | DynamoDB — `ConnectChaosConfig` | ✓ | ✓ | Global Table (create in primary, auto-replicates) |
+| DynamoDB — `ConnectChaosCallLog` | ✓ | ✓ | Global Table (inbound-call log, create in primary, auto-replicates) |
 | S3 — FIS config bucket | ✓ | ✓ | StackSet (per-region bucket) |
 | FIS Experiment Templates ×3 | ✓ | ✓ | StackSet |
 | CloudWatch Alarms ×4 + Composite | ✓ | ✓ | StackSet |
@@ -163,7 +165,7 @@ After the FIS experiment ends and metrics return to normal:
 | `DashboardType` | | `regional` | `regional` (per-region) or `unified` (cross-region in primary) |
 | `EnableTrafficGenerator` | | `false` | Deploy the optional synthetic-traffic Lambda |
 | `ContactFlowErrorsThreshold` | | `5` | Experiment 2 alarm threshold |
-| `RuntimeLambdaErrorsThreshold` | | `3` | Experiment 3 alarm threshold |
+| `LexCodeHookLatencyThresholdMs` | | `7000` | Experiment 3 alarm threshold — `LexFulfillmentHandler` Duration (ms) |
 | `MissedCallsThreshold` | | `5` | Experiment 4 alarm threshold |
 | `FISExperimentDuration` | | `PT5M` | ISO-8601 duration for FIS experiments 1–3 |
 
@@ -295,6 +297,8 @@ aws cloudformation create-stack-instances \
 ### Alternative: Deploy Individually Per Region
 
 If you prefer not to use a StackSet, deploy the same template twice with `aws cloudformation deploy`. The variable names are identical to the section above.
+
+> **Note:** the template is larger than CloudFormation's 51,200-byte inline limit, so `aws cloudformation deploy` needs an S3 staging bucket — add `--s3-bucket <your-bucket> --s3-prefix cfn-staging` to each command below (your `LambdaCodeBucket` works). For StackSets, use `--template-url` (S3) instead of `--template-body file://`.
 
 ```bash
 # Primary region (creates the Lex bot; Global Resiliency replicates it to paired)
@@ -457,7 +461,7 @@ aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
 aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
   --payload '{"mode": "faulty", "fault_type": "dynamodb", "count": 10}' /dev/stdout
 
-# Simulate Experiment 3: Lex RuntimeLambdaErrors
+# Simulate Experiment 3: Lex code-hook latency (emits high LexFulfillmentHandler Duration)
 aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
   --payload '{"mode": "faulty", "fault_type": "lex", "count": 10}' /dev/stdout
 

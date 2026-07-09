@@ -27,3 +27,31 @@ cdk.out/
 *.docx
 *.doc
 *.pdf
+
+# Local scratch/debug files from manual testing (root-level dotfiles)
+# These are ad-hoc dumps of AWS CLI output captured while testing; never commit them.
+.alarm.json
+.cfealarm.json
+.cfedims.json
+.cfemetrics.json
+.cfg.txt
+.connmetrics.txt
+.diag.txt
+.dp.log
+.dpp.log
+.err.txt
+.exp1.txt
+.exp2.txt
+.exp2det.json
+.fisw.txt
+.fl.txt
+.fl2.txt
+.fl3.txt
+.instnum.json
+.inv.txt
+.lexids.txt
+.lxlog.txt
+.m.txt
+.mx.txt
+.tdgnum.json
+.testflow2.json

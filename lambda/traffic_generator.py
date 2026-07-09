@@ -106,26 +106,22 @@ def generate_contact_flow_errors(instance_id, count):
         )
 
 
-def generate_lex_runtime_errors(bot_id, bot_alias_id, count):
-    """Simulate Experiment 3: Lex RuntimeLambdaErrors from code hook timeout.
-    
-    The alarm uses metric math summing across RecognizeUtterance (Speech) and
-    RecognizeText (Text) operations. Dimensions must include InputMode and
-    LocaleId to match the alarm's metric definition exactly.
+def generate_lex_codehook_latency(function_name, count):
+    """Simulate Experiment 3: Lex fulfillment code-hook latency.
+
+    Exp 3's alarm watches AWS/Lambda Duration (Maximum) for LexFulfillmentHandler,
+    because the FIS invocation-add-delay fault surfaces as a slow code hook — not as
+    AWS/Lex RuntimeLambdaErrors on the real Connect voice (StartConversation) path.
+    We therefore emit a high Duration datapoint (~31s, mirroring the injected delay)
+    so the alarm fires. See FIXES.md (Fix 7).
     """
     for _ in range(count):
-        # Primarily emit voice errors (RecognizeUtterance) since that's the
-        # dominant channel for Connect telephony traffic
         put_metric(
-            "AWS/Lex",
-            "RuntimeLambdaErrors",
-            {
-                "BotId": bot_id,
-                "BotAliasId": bot_alias_id,
-                "Operation": "RecognizeUtterance",
-                "InputMode": "Speech",
-                "LocaleId": "en_US",
-            },
+            "AWS/Lambda",
+            "Duration",
+            {"FunctionName": function_name},
+            value=random.uniform(30000, 32000),
+            unit="Milliseconds",
         )
 
 
@@ -179,8 +175,8 @@ def handler(event, context):
             results["metrics_emitted"].append("Connect/ContactFlowErrors")
 
         if fault_type in ("lex", "all"):
-            generate_lex_runtime_errors(bot_id, bot_alias_id, count)
-            results["metrics_emitted"].append("Lex/RuntimeLambdaErrors")
+            generate_lex_codehook_latency(function_name, count)
+            results["metrics_emitted"].append("Lambda/Duration (Lex code hook)")
 
         if fault_type in ("flow", "all"):
             generate_missed_calls(instance_id, count)

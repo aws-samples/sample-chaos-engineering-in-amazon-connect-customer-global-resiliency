@@ -21,7 +21,7 @@ LAMBDA_DIR := lambda
 BUILD_DIR  := build
 TEMPLATE   := cfn/main-template.yaml
 
-LAMBDAS := lex_fulfillment_handler traffic_shift_handler traffic_generator
+LAMBDAS := lex_fulfillment_handler traffic_shift_handler traffic_generator call_logger
 ZIPS    := $(addprefix $(BUILD_DIR)/,$(addsuffix .zip,$(LAMBDAS)))
 
 .PHONY: all package upload deploy clean lint help
@@ -50,6 +50,7 @@ upload: package
 	aws s3 cp $(BUILD_DIR)/lex_fulfillment_handler.zip s3://$(BUCKET)/connect-chaos/ --region $(REGION)
 	aws s3 cp $(BUILD_DIR)/traffic_shift_handler.zip   s3://$(BUCKET)/connect-chaos/ --region $(REGION)
 	aws s3 cp $(BUILD_DIR)/traffic_generator.zip       s3://$(BUCKET)/connect-chaos/ --region $(REGION)
+	aws s3 cp $(BUILD_DIR)/call_logger.zip             s3://$(BUCKET)/connect-chaos/ --region $(REGION)
 
 deploy:
 	@if [ -z "$(STACK)" ] || [ -z "$(REGION)" ] || [ -z "$(CONNECT_INSTANCE_ARN)" ]; then \
@@ -82,7 +83,7 @@ lint:
 	# primary-region deploys (only populated in paired-region). Ignore them.
 	cfn-lint -i W1030 -- $(TEMPLATE)
 	bash -n scripts/wire-paired-flow.sh
-	python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ['$(LAMBDA_DIR)/lex_fulfillment_handler.py', '$(LAMBDA_DIR)/traffic_shift_handler.py', '$(LAMBDA_DIR)/traffic_generator.py']]; print('Python: OK')"
+	python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ['$(LAMBDA_DIR)/lex_fulfillment_handler.py', '$(LAMBDA_DIR)/traffic_shift_handler.py', '$(LAMBDA_DIR)/traffic_generator.py', '$(LAMBDA_DIR)/call_logger.py']]; print('Python: OK')"
 	python3 -c "import json; [json.load(open(f)) for f in ['contact-flows/main-ivr-flow.json', 'contact-flows/chaos-test-flow.json']]; print('JSON: OK')"
 
 clean:

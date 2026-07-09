@@ -19,15 +19,21 @@ FIS Targeting:
 
 CloudWatch Metrics Produced on Failure:
   - AWS/Lambda: Errors (Exp 1, 2, 3)
-  - AWS/Lex: RuntimeLambdaErrors (Exp 1, 2, 3)
-  - AWS/Connect: ContactFlowErrors (Exp 2 — flow Error branch)
+  - AWS/Lex: RuntimeLambdaErrors (Exp 1, 2, 3 — voice path)
   - AWS/Connect: MissedCalls (Exp 4 — custom flow logic)
+
+Note: Experiment 2's distinct metric, AWS/Connect ContactFlowErrors, is NOT produced by
+this fulfillment code hook. A DDB failure reached through Lex is handled by the flow's Lex
+block error branch and surfaces as Lambda Errors / RuntimeLambdaErrors instead. Exp 2's
+ContactFlowErrors is produced by the separate call_logger.py Lambda, which the flow
+invokes directly via an "Invoke AWS Lambda function" block (see FIXES.md, Fix 6).
 """
 
 import os
 import json
 import logging
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
 
 logger = logging.getLogger()
@@ -37,7 +43,21 @@ logger.setLevel(logging.INFO)
 TABLE_NAME = os.environ.get('CUSTOMER_TABLE_NAME', 'ConnectChaosCustomers')
 CHAOS_TABLE_NAME = os.environ.get('CHAOS_TABLE_NAME', 'ConnectChaosConfig')
 
-dynamodb = boto3.resource('dynamodb')
+# Short, bounded DynamoDB timeouts so Experiment 2 (network disruption) fails FAST
+# and CATCHABLY instead of hanging until the 8s Lambda timeout. If the DDB call
+# hangs to the Lambda timeout, the failure is recorded as an AWS/Lambda "timeout"
+# (an AWS/Lambda Errors datapoint) rather than surfacing as a clean Lex code-hook
+# error -> contact-flow error branch -> AWS/Connect ContactFlowErrors. With a ~2s
+# connect/read timeout and no retries, the boto3 call raises within ~2s, the
+# handler's except catches it and re-raises, Lex sees a prompt code-hook error, and
+# the flow's Error branch fires (producing ContactFlowErrors as Experiment 2 intends).
+_DDB_CONFIG = Config(
+    connect_timeout=2,
+    read_timeout=2,
+    retries={'total_max_attempts': 1},
+)
+
+dynamodb = boto3.resource('dynamodb', config=_DDB_CONFIG)
 customer_table = dynamodb.Table(TABLE_NAME)
 chaos_table = dynamodb.Table(CHAOS_TABLE_NAME)
 
