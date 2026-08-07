@@ -304,3 +304,201 @@ When a brand-new stack fails to create, `aws cloudformation deploy` rolls it bac
 deletes it, discarding the events you need to debug. To preserve a failed first-create for
 inspection, use `aws cloudformation create-stack --on-failure DO_NOTHING` instead, read the
 failure from `describe-stack-events`, then delete manually.
+
+---
+
+# Round 2 — correctness review and prerequisite removal
+
+A second pass over the template. Fixes 8–10 are defects that would have broken the sample's
+central claim; 11–13 remove prerequisites. Everything here was verified against AWS
+documentation or a live API call, and the record below deliberately includes **two ideas that
+were investigated and rejected**, so they are not "fixed" again later.
+
+## Summary
+
+| # | Component | Symptom | Fix |
+|---|-----------|---------|-----|
+| 8 | Contact flows | After failover the paired region invoked the **primary** region's Lex bot, so the "served locally" claim was false | Use the ACGR `$.AwsRegion` runtime token in the flow's Lex alias ARN |
+| 9 | Experiment 4 | `MissedCalls` cannot be produced without a staffed agent deliberately not answering — not reproducible by a reader | Route the failure path to a **no-agent** queue and alarm on `LongestQueueWaitTime` |
+| 10 | Lambda runtime | `python3.12` | `python3.13` (supported to Jun 2029) |
+| 11 | VPC | The reader had to supply a VPC whose subnets could reach DynamoDB **and S3** | `CreateVpc=true` builds it, with free gateway endpoints |
+| 12 | FIS layer ARN | Hand-copied per region; both the publishing account and version differ, so a wrong value fails silently | Resolve from the AWS public SSM parameter |
+| 13 | Code bucket | Manual create + zip + upload to an exact prefix | `make` creates the bucket and uploads; also stages the oversized template |
+
+---
+
+## Fix 8 — Flows hardcoded the primary region's Lex ARN (breaks the core claim)
+
+**Symptom:** both flows carried `"AliasArn":"${ConnectChaosBotAlias.Arn}"`, which resolves to
+a **primary-region** ARN. ACGR replicates flow content verbatim, so the paired region's copy
+still pointed at the primary region's Lex bot. Traffic would shift correctly and the metrics
+would look right, while the paired region depended on the region we had just declared
+unhealthy.
+
+**Why it was not caught earlier:** the failure is invisible unless you deploy *both* regions
+and inspect which region's Lambda logs the call. A previous London run only ever verified
+that traffic shifted.
+
+**Fix:**
+
+```
+arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}
+```
+
+`$.AwsRegion` is resolved by Connect at flow runtime to the region the flow is executing in.
+This works because Lex Global Resiliency preserves the bot ID and alias ID across regions, so
+the same ID pair is valid in both. Per the ACGR requirements, `$.AwsRegion` is supported
+**only** for Lambda and Lex ARNs.
+
+**Still required when Lex GR is off** (`ap-northeast-1`↔`ap-northeast-3`): the per-region bot
+IDs differ, so `$.AwsRegion` alone is insufficient and `scripts/wire-paired-flow.sh` must be
+run after deploy.
+
+**Verification:** with traffic at 0%/100%, place a call and confirm the **paired** region's
+`LexFulfillmentHandler` logs it and the primary's does not. See the runbook.
+
+---
+
+## Fix 9 — Experiment 4 was not reproducible
+
+**Symptom:** Exp 4 alarmed on `AWS/Connect MissedCalls`, defined as a voice call *not
+answered by an agent within 20 seconds*. It therefore needs a real agent, staffed and
+logged in, who deliberately does not answer. A reader following the runbook cannot
+reproduce that, and the earlier `AgentQueueArn` approach only moved the problem (it required
+a staffed queue).
+
+**Fix:** create `ConnectChaos-Overflow`, a queue that **no routing profile references**, so
+no agent can ever receive its contacts. The chaos-test flow's failure path now does
+`UpdateContactTargetQueue` → `TransferContactToQueue` into it, so a contact waits
+indefinitely and `LongestQueueWaitTime` rises deterministically with no human involved.
+
+Verified dimensions: `InstanceId` + `MetricGroup=Queue` + `QueueName`. `Statistic: Maximum`,
+because longest-wait is a gauge, not a rate. An `AWS::Connect::Queue` requires an
+`HoursOfOperationArn`, so a 24×7 `ConnectChaos-24x7` is created alongside it. Both are
+primary-only and replicated by ACGR, which also remaps the flow's queue reference — so no
+`$.AwsRegion` handling is needed for Connect-internal ARNs.
+
+`MissedCallsThreshold` is replaced by `QueueWaitSecondsThreshold` (default 60).
+
+> **Not yet validated on real telephony.** The mechanism is sound and the dimensions are
+> confirmed, but unlike Exps 1–3 this has not been proven with a live call. Treat the first
+> run as its verification.
+
+---
+
+## Fix 11 — VPC prerequisite removed (and why S3 matters as much as DynamoDB)
+
+The reader previously had to bring a VPC whose subnets could reach DynamoDB. `CreateVpc=true`
+(default) now builds a VPC, two private subnets in different AZs, a route table, an
+egress-only security group, and **gateway endpoints for DynamoDB and S3**.
+
+**No NAT gateway and no internet gateway.** Which functions are actually VPC-attached was
+checked rather than assumed:
+
+| Function | `VpcConfig` | Talks to |
+|---|:---:|---|
+| `LexFulfillmentHandler` | yes | DynamoDB, S3 (FIS extension) |
+| `ConnectChaos-CallLogger` | yes | DynamoDB, S3 (FIS extension) |
+| `ConnectChaos-TrafficShiftHandler` | no | Connect APIs |
+| `ConnectChaos-TrafficGenerator` | no | CloudWatch |
+
+Only DynamoDB and S3 reachability is needed, and gateway endpoints for both are free — *"There
+is no additional charge for using gateway endpoints"* (VPC PrivateLink docs). So the VPC adds
+**$0**.
+
+**S3 is not optional.** The FIS Lambda extension polls S3 for its fault config via
+`AWS_FIS_CONFIGURATION_LOCATION`. Without an S3 route, Experiments 1 and 3 **silently** never
+apply their fault — the invocation simply runs normally. This is the single easiest thing to
+get wrong when bringing your own VPC.
+
+`CreateVpc=false` preserves the old behaviour. The subnet/SG parameters had to move from
+`AWS::EC2::Subnet::Id` / `SecurityGroup::Id` to `String`, because the strict types reject an
+empty value. A new Rule, `BringYourOwnVpcNeedsIds`, asserts all three are supplied when
+`CreateVpc=false`, so the looser type cannot silently produce a broken stack. FIS Experiment
+2's subnet targets follow the effective subnets either way.
+
+---
+
+## Fix 12 — FIS extension layer ARN now resolves itself
+
+Hand-copying this value is unusually error-prone because **both the publishing account and
+the version differ per region**:
+
+```
+us-east-1 -> arn:aws:lambda:us-east-1:211125607513:layer:aws-fis-extension-x86_64:374
+us-west-2 -> arn:aws:lambda:us-west-2:975050054544:layer:aws-fis-extension-x86_64:370
+```
+
+A wrong ARN does not fail loudly — the extension simply never applies a fault.
+
+`FISExtensionLayerArn` is now `AWS::SSM::Parameter::Value<String>` defaulting to
+`/aws/service/fis/lambda-extension/AWS-FIS-extension-x86_64/1.x.x`, which CloudFormation
+resolves per region at deploy time. Override only to pin a version.
+
+Cross-account `lambda:ListLayerVersions` is **denied** on the public layer, so SSM is the only
+programmatic route.
+
+---
+
+## Fix 13 — No manual bucket, no manual zipping
+
+`make bucket` creates the code bucket if missing (idempotent); `upload`/`bootstrap`/`deploy`
+depend on it. The same bucket stages the template, which is **mandatory rather than optional**:
+the template is ~65 KB and CloudFormation's inline `TemplateBody` limit is 51,200 bytes.
+
+`make deploy-pair` deploys both regions in order and hands the Lex GR bot/alias IDs from the
+primary stack to the paired stack, leaving **both** standing — which is what makes Fix 8's
+verification possible.
+
+Deploy now needs only `STACK`, `REGION`, `CONNECT_INSTANCE_ARN`, `CONNECT_INSTANCE_ID`,
+`TDG_ID`.
+
+---
+
+## Investigated and REJECTED — do not redo these
+
+### Adding `Operation=StartConversation` to a `RuntimeLambdaErrors` alarm
+
+Reasoning from documentation suggests Connect voice should report `RuntimeLambdaErrors` with
+`Operation=StartConversation`, since Connect drives Lex over the streaming API. It is a
+plausible chain and it is **wrong in practice**: Fix 7 established by `list-metrics` over
+repeated real calls that the only dimension set this bot ever emits is
+`RecognizeUtterance/Speech` (synthetic traffic). Adding `StartConversation` to the alarm
+creates a branch that never matches.
+
+Experiment 3 stays on Lambda `Duration`. Do not "restore" the Lex metric.
+
+### Inlining the Lambda code with `Code.ZipFile`
+
+Attractive because it removes the zip-and-upload step. The inline limit is **4 MB**, so it
+would fit. Rejected because:
+
+- the template is already ~65 KB, over the 51,200-byte inline limit, so a staging bucket is
+  needed **regardless** — inlining buys nothing there;
+- it duplicates 27.6 KB of Python inside the YAML, which will drift from `lambda/*.py`;
+- CloudFormation names the inline file `index`, forcing every handler to be renamed to
+  `index.*`.
+
+Fix 13 automates the bucket instead, achieving the same goal without the drift risk.
+
+### Adding botocore fast-fail timeouts to `LexFulfillmentHandler`
+
+Would have broken Experiment 3. That function's **40 s timeout is load-bearing**: the ~31 s
+injected delay must complete and return cleanly so `Duration` spikes while `Errors` stays 0.
+Short timeouts would turn it into an error and make Exp 3 indistinguishable from Exp 1.
+
+`call_logger.py` already has an appropriate fast-fail Config (`connect_timeout=2`,
+`read_timeout=2`, single attempt) — correct there, because it is invoked directly by the flow
+under an 8 s limit and must surface a DynamoDB failure as a handled error.
+
+---
+
+## Open verification items
+
+Not yet proven on real telephony:
+
+1. **Fix 8** — a call answered in the paired region, confirmed via that region's Lambda logs.
+2. **Fix 9** — `LongestQueueWaitTime` breaching on a genuinely unstaffed queue.
+3. **Fix 11** — that a VPC-attached Lambda writes CloudWatch Logs through only DynamoDB and
+   S3 gateway endpoints. If logs are missing after the first deploy, add a CloudWatch Logs
+   interface endpoint (~$7/month/AZ). This was deliberately not added speculatively.

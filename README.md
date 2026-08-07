@@ -1,14 +1,26 @@
 # Amazon Connect Chaos Engineering with FIS & ACGR Failover
 
-> **⚠️ Important:** Amazon Connect Global Resiliency (ACGR) requires **AWS Enterprise Support** and must be onboarded through your AWS account team. This sample assumes ACGR is already enabled with a Traffic Distribution Group configured.
+> **Requires AWS Enterprise Support.** Amazon Connect Global Resiliency (ACGR) is onboarded
+> through your AWS account team. This sample assumes you already have an ACGR-paired Connect
+> instance and a Traffic Distribution Group with a **ported** phone number attached.
 
 ## Overview
 
-This sample demonstrates **chaos engineering** for an Amazon Connect contact center using:
-- **AWS Fault Injection Service (FIS)** to inject faults into individual components
-- **Amazon Connect Global Resiliency (ACGR)** to automatically fail over telephony traffic to a healthy paired region
+Inject controlled faults into a live Amazon Connect contact centre with **AWS Fault
+Injection Service (FIS)**, watch CloudWatch detect them, and verify that **ACGR** shifts
+telephony traffic to the healthy paired region — where the call is still answered.
 
-Each experiment targets a **distinct component** and monitors a **distinct CloudWatch metric** — proving that failures in any layer (Lambda, DynamoDB, Lex, Contact Flow) are independently observable and can trigger regional failover.
+Each experiment has an **attributing metric** that names the failing component, so you can
+tell *which* layer broke.
+
+> **On cascades — read this before you judge the results.** Every fault in this sample
+> ultimately flows through a Lambda, so `AWS/Lambda Errors` rises during Experiments 1, 2
+> and 3. That is inherent to a synchronous IVR call path, not a defect. The composite alarm
+> ORs all four component alarms, so failover happens regardless. When demonstrating a
+> *specific* experiment, watch **that experiment's own alarm**, not the composite.
+
+**New here?** Follow **[RUNBOOK.md](RUNBOOK.md)** — a sequential deploy-then-test guide with
+pre-flight checks, expected results, and the mandatory reset step between experiments.
 
 ---
 
@@ -16,130 +28,146 @@ Each experiment targets a **distinct component** and monitors a **distinct Cloud
 
 ![Architecture](docs/architecture.png)
 
+> Diagram source is `docs/architecture.dac.yaml`. Regenerate the PNG with
+> `awsdac docs/architecture.dac.yaml --output docs/architecture.png`.
+
 ```
-                              ┌─────────────────────────────┐
-                              │  Traffic Distribution Group  │
-                              │  (ACGR)                     │
-                              │                             │
-                              │  IAD: 100% ←→ PDX: 0%      │
-                              └──────────┬──────────────────┘
-                                         │
-                    ┌────────────────────┴────────────────────┐
-                    │                                          │
-              IAD (Primary)                             PDX (Paired)
-              ┌──────────────┐                    ┌──────────────┐
-              │ Connect      │                    │ Connect      │
-              │ Contact Flow │                    │ Contact Flow │
-              │      │       │                    │ (Replicated) │
-              │      ▼       │                    └──────────────┘
-              │ Lex V2 Bot   │                    ┌──────────────┐
-              │      │       │                    │ Lex V2 Bot   │
-              │      ▼       │                    │ (Lex GR rep.) │
-              │ Lambda       │                    └──────────────┘
-              │ (Fulfillment)│                    ┌──────────────┐
-              │      │       │                    │ Lambda       │
-              │      ▼       │                    │ (Fulfillment)│
-              │ DynamoDB     │── Global Table ──► │ DynamoDB     │
-              └──────────────┘                    └──────────────┘
-                    │                                    │
-              FIS Experiments                      FIS Experiments
-              (target local                       (target local
-               components)                         components)
+                        ┌──────────────────────────────────┐
+                        │  Traffic Distribution Group      │
+                        │           (ACGR)                 │
+                        │  normal:   IAD 100% | PDX 0%     │
+                        │  failover: IAD 0%   | PDX 100%   │
+                        └───────────────┬──────────────────┘
+                                        │
+             ┌──────────────────────────┴──────────────────────────┐
+       PRIMARY (us-east-1)                              PAIRED (us-west-2)
+       ┌──────────────────────┐                    ┌──────────────────────┐
+       │ Connect instance     │                    │ Connect instance     │
+       │ Contact flows ───────┼── ACGR replicates ►│ Contact flows        │
+       │        │             │                    │        │             │
+       │        ▼             │                    │        ▼             │
+       │ Lex V2 bot ──────────┼──── Lex GR ───────►│ Lex V2 bot (same id) │
+       │        │             │                    │        │             │
+       │        ▼             │                    │        ▼             │
+       │ LexFulfillmentHandler│                    │ LexFulfillmentHandler│
+       │ ConnectChaos-        │                    │ ConnectChaos-        │
+       │   CallLogger         │                    │   CallLogger         │
+       │        │             │                    │        │             │
+       │        ▼             │                    │        ▼             │
+       │ DynamoDB ────────────┼── global tables ──►│ DynamoDB             │
+       │ ConnectChaos-Overflow│                    │ (replicated)         │
+       │   queue (no agents)  │                    │                      │
+       └──────────────────────┘                    └──────────────────────┘
+                    │                                        │
+              4 alarms → composite → EventBridge → TrafficShiftHandler
+                                        │
+                                        ▼
+                         UpdateTrafficDistribution (ACGR)
 ```
 
 ---
 
-## Experiments — One Per Component
+## Experiments
 
-| # | Component | FIS Action | Metric (Distinct) | Namespace |
-|---|-----------|-----------|-------------------|-----------:|
-| **1** | Lambda | `aws:lambda:invocation-error` | `Errors` | AWS/Lambda |
-| **2** | DynamoDB | `aws:network:disrupt-connectivity` scope=dynamodb | `ContactFlowErrors` | AWS/Connect |
-| **3** | Lex code hook | `aws:lambda:invocation-add-delay` (~31s) | `Duration` (code-hook latency) | AWS/Lambda |
-| **4** | Contact Flow | Custom (DDB chaos flag → Lex returns Failed) | `MissedCalls` | AWS/Connect |
+| # | Component | Fault | Attributing metric | Namespace |
+|---|-----------|-------|--------------------|-----------|
+| **1** | Lambda | `aws:lambda:invocation-error` (`preventExecution`) | `Errors` | AWS/Lambda |
+| **2** | DynamoDB | `aws:network:disrupt-connectivity` scope=`dynamodb` | `ContactFlowErrors` | AWS/Connect |
+| **3** | Lex code hook | `aws:lambda:invocation-add-delay` (~31 s) | `Duration` (Maximum) | AWS/Lambda |
+| **4** | Contact flow | DynamoDB chaos flag → no-agent queue | `LongestQueueWaitTime` | AWS/Connect |
 
-### Experiment Details
+### Experiment 1 — Lambda invocation failure
+FIS marks every `LexFulfillmentHandler` invocation as failed without running the code.
+- **Alarm:** `ConnectChaos-Lambda-Errors-{region}`
+- **⚠️ 180-second window** — see [Operational constraints](#operational-constraints).
 
-#### Experiment 1: Lambda Invocation Failure
-- **What:** FIS prevents the `LexFulfillmentHandler` Lambda from executing
-- **How:** `aws:lambda:invocation-error` with `preventExecution: true`
-- **Effect:** Lambda emits `Errors` metric in AWS/Lambda namespace
-- **Alarm:** `ConnectChaos-Lambda-Errors-{region}` (threshold: >5 errors/min)
+### Experiment 2 — DynamoDB unreachable
+FIS blocks both Lambda subnets from the DynamoDB endpoint at the network ACL. The flow
+invokes `ConnectChaos-CallLogger` **directly** (a real audit write), so its DynamoDB failure
+takes the flow's Error branch and `ContactFlowErrors` increments on its own path rather than
+only riding the Lambda-Errors alarm.
+- **Alarm:** `ConnectChaos-ContactFlow-Errors-{region}`
+- **No 180 s window** — network-level, so the DynamoDB path is severed for the whole
+  experiment. **This is the most reliable experiment to demo with a live call.**
 
-#### Experiment 2: DynamoDB Network Disruption
-- **What:** FIS blocks network connectivity from the Lambda VPC subnets to DynamoDB
-- **How:** `aws:network:disrupt-connectivity` with `scope: dynamodb`
-- **Effect:** the first block of the contact flow invokes the **call-logger Lambda directly** (an "Invoke AWS Lambda function" block) to persist the inbound contact to the `ConnectChaosCallLog` DynamoDB table. With DynamoDB unreachable, that Lambda's `put_item` raises within ~2s, Connect routes the contact down the block's **Error branch**, and `ContactFlowErrors` fires.
-- **Alarm:** `ConnectChaos-ContactFlow-Errors-{region}` (threshold: `>ContactFlowErrorsThreshold`, default 5 — lower it for single-call demos)
+### Experiment 3 — Lex code-hook latency
+FIS injects a ~31 s startup delay while the function's timeout is 40 s, so the code hook
+runs slow but still returns cleanly. Observed as Lambda **Duration**, not a Lex error.
+- **Alarm:** `ConnectChaos-Lex-CodeHookLatency-{region}` (threshold `LexCodeHookLatencyThresholdMs`, default 7000 ms)
+- **Why not `AWS/Lex RuntimeLambdaErrors`?** Because it is never emitted on Connect's real
+  voice path. `list-metrics` on this bot shows the only dimension set ever produced is
+  `RecognizeUtterance/Speech` (synthetic traffic) — never `StartConversation`. See
+  [FIXES.md](FIXES.md) Fix 7. Duration is the reliable real-call signal and stays cleanly
+  distinct from Experiment 1, where the function never runs (Duration ~0, Errors > 0).
+- **⚠️ 180-second window** applies.
 
-#### Experiment 3: Lex Code Hook Latency
-- **What:** FIS injects a ~31s startup delay into the Lex fulfillment Lambda so the code hook becomes pathologically slow
-- **How:** `aws:lambda:invocation-add-delay` with `startupDelayMilliseconds: 31000` (the Lambda timeout is raised to 40s so it still returns rather than erroring)
-- **Effect:** `LexFulfillmentHandler` Duration spikes to ~31s on every call
-- **Alarm:** `ConnectChaos-Lex-CodeHookLatency-{region}` — `AWS/Lambda` `Duration` (Maximum) `> LexCodeHookLatencyThresholdMs` (default 7000 ms)
-
-#### Experiment 4: Contact Flow Logic Failure (Custom)
-- **What:** A DynamoDB chaos flag (`chaos_enabled=true`) causes Lambda to return `Failed` state to Lex
-- **How:** Set DDB item `{config_key: "chaos_flag", enabled: true}` in `ConnectChaosConfig` table
-- **Effect:** Lex returns Failure response → Contact flow routes to overflow queue (no agents) → `MissedCalls` fires
-- **Alarm:** `ConnectChaos-MissedCalls-{region}` (threshold: >5 in 5 min)
+### Experiment 4 — Contact flow failure → no-agent queue
+A DynamoDB chaos flag makes the fulfillment Lambda return `Failed` to Lex. The Chaos Test
+flow's failure path sets **`ConnectChaos-Overflow`** — a queue referenced by no routing
+profile, so no agent can ever receive its contacts — and transfers the contact there. It
+waits indefinitely and `LongestQueueWaitTime` climbs.
+- **Alarm:** `ConnectChaos-QueueWait-{region}` (threshold `QueueWaitSecondsThreshold`, default 60 s)
+- **Why not `MissedCalls`?** That metric requires a call to be *offered to an agent* and go
+  unanswered for 20 s, which is not reproducible without a staffed agent deliberately not
+  answering. A queue with no agents makes the signal deterministic.
+- Not a FIS experiment — you toggle a DynamoDB flag.
 
 ---
 
 ## Failover Mechanism
 
 ```
-ANY Alarm fires → Composite Alarm = ALARM
-    → EventBridge Rule
-        → TrafficShiftHandler Lambda
-            → UpdateTrafficDistribution API
-                → 0% THIS region / 100% OTHER region
-
-New calls route to healthy region automatically.
+any component alarm → composite alarm ALARM
+  → EventBridge rule
+    → TrafficShiftHandler
+      → UpdateTrafficDistribution:  this region 0%  /  other region 100%
 ```
 
-Each region's `TrafficShiftHandler` Lambda shifts traffic **away from itself** — the region detecting failure is the one that initiates failover.
+Each region runs its own `TrafficShiftHandler` that shifts traffic **away from itself**, so
+the region detecting the fault initiates the failover. The handler is idempotent — it reads
+the current distribution first and no-ops if traffic has already moved.
 
-### Recovery
-After the FIS experiment ends and metrics return to normal:
-- Alarms return to OK state
-- Traffic is shifted back manually (or via auto-recovery if enabled)
+**Recovery is deliberately manual.** Nothing shifts traffic back automatically, so an
+operator can confirm the fault is genuinely resolved first. See Step R in the runbook.
 
 ---
 
 ## Resources Deployed
 
-| Resource | Primary | Paired | Deployment Method |
+| Resource | Primary | Paired | How |
 |----------|:---:|:---:|---|
-| Contact Flow — Main IVR | ✓ | ✓ | ACGR auto-replicates |
-| Contact Flow — Chaos Test | ✓ | ✓ | ACGR auto-replicates |
-| Lex V2 Bot + Alias | ✓ | ✓ | StackSet (independent per region) |
-| Lambda — `LexFulfillmentHandler` | ✓ | ✓ | StackSet |
-| Lambda — `ConnectChaos-CallLogger` | ✓ | ✓ | StackSet (direct flow invoke: logs inbound call → also drives Exp 2 `ContactFlowErrors`) |
-| Lambda — `TrafficShiftHandler` | ✓ | ✓ | StackSet (requires `EnableAutoFailover=true`) |
-| DynamoDB — `ConnectChaosCustomers` | ✓ | ✓ | Global Table (create in primary, auto-replicates) |
-| DynamoDB — `ConnectChaosConfig` | ✓ | ✓ | Global Table (create in primary, auto-replicates) |
-| DynamoDB — `ConnectChaosCallLog` | ✓ | ✓ | Global Table (inbound-call log, create in primary, auto-replicates) |
-| S3 — FIS config bucket | ✓ | ✓ | StackSet (per-region bucket) |
-| FIS Experiment Templates ×3 | ✓ | ✓ | StackSet |
-| CloudWatch Alarms ×4 + Composite | ✓ | ✓ | StackSet |
-| CloudWatch Dashboard | ✓ | ✓ | StackSet (type depends on `DashboardType` param) |
-| EventBridge Rule | ✓ | ✓ | StackSet (requires `EnableAutoFailover=true`) |
-| SNS Topic — `AlarmNotificationTopic` | ✓ | ✓ | StackSet (alarm actions + OK actions) |
-| IAM Roles | ✓ | ✓ | StackSet (region-suffixed names) |
-
-> **Note:** By default, Lex Global Resiliency replicates the bot from the primary region to the paired region (supported for `us-east-1`↔`us-west-2` and `eu-west-2`↔`eu-central-1`). For `ap-northeast-1`↔`ap-northeast-3`, set `EnableLexGlobalResiliency=false` — the bot deploys independently to each region via StackSet.
+| VPC, 2 private subnets, route table, SG | ✓ | ✓ | Created when `CreateVpc=true` (default) |
+| Gateway endpoints — DynamoDB + S3 | ✓ | ✓ | Free; S3 is required by the FIS extension |
+| Contact flows — Main IVR + Chaos Test | ✓ | ✓ | Created in primary, ACGR replicates |
+| Queue `ConnectChaos-Overflow` + 24×7 hours | ✓ | ✓ | Created in primary, ACGR replicates |
+| Lex V2 bot + version + alias | ✓ | ✓ | Primary creates; Lex GR replicates (same IDs) |
+| Connect ↔ Lex `IntegrationAssociation` | ✓ | ✓ | Per region, against its local bot |
+| `LexFulfillmentHandler` (40 s timeout) | ✓ | ✓ | Per region, same name in both (ACGR requirement) |
+| `ConnectChaos-CallLogger` | ✓ | ✓ | Per region; invoked directly by the flow |
+| `ConnectChaos-TrafficShiftHandler` | ✓ | ✓ | Requires `EnableAutoFailover=true` |
+| DynamoDB global tables ×3 | ✓ | ✓ | Created in primary, auto-replicated |
+| S3 — FIS config bucket (`ccfis-…`) | ✓ | ✓ | Created per region |
+| FIS experiment templates ×3 | ✓ | ✓ | Per region |
+| CloudWatch alarms ×4 + composite | ✓ | ✓ | Per region |
+| SNS topic for alarm notifications | ✓ | ✓ | Subscribe manually after deploy |
+| Dashboard | ✓ | ✓ | `regional` or `unified` |
 
 ---
 
 ## Prerequisites
 
-1. **AWS Enterprise Support** (or AWS Unified Operations) — required for ACGR onboarding
-2. **Amazon Connect instance** with ACGR enabled, paired with a secondary region, and a production SAML 2.0 identity provider configured on the source instance
-3. **Traffic Distribution Group** already created with **ported** phone number(s) associated (claimed-only numbers are not eligible for ACGR)
-4. **VPC** with at least two subnets in each region (required for Experiment 2 — DDB network disruption targets both subnets)
-5. **S3 bucket** with packaged Lambda .zip files (see Deployment Step 1)
-6. **FIS Lambda extension layer ARN** for your region and architecture — see [AWS docs](https://docs.aws.amazon.com/fis/latest/userguide/fis-actions-reference.html)
+1. **AWS Enterprise Support** (or AWS Unified Operations) — required to onboard ACGR.
+2. **ACGR-paired Connect instance**, SAML 2.0 enabled. The replica has the **same instance
+   ID** in both regions — that is how you recognise an ACGR pair.
+3. **Traffic Distribution Group** with a **ported** phone number attached (claimed-only
+   numbers are not eligible for ACGR).
+4. Supported region pair: `us-east-1`↔`us-west-2`, `eu-west-2`↔`eu-central-1`, or
+   `ap-northeast-1`→`ap-northeast-3`. Enforced by the template's `Rules` block.
+5. Ensure Lambda functions have the **same name across regions** and that flows avoid
+   hardcoded regions — both handled by this template.
+
+**You do NOT need to pre-create:** a VPC, subnets, a security group, an S3 bucket, or the
+FIS extension layer ARN. All are created or auto-resolved.
 
 ---
 
@@ -147,435 +175,265 @@ After the FIS experiment ends and metrics return to normal:
 
 | Parameter | Required | Default | Notes |
 |-----------|:---:|---|---|
-| `ConnectInstanceArn` | ✓ | — | ACGR-enabled Connect instance ARN for **this** region |
-| `ConnectInstanceId` | ✓ | — | Connect instance UUID for **this** region |
-| `TrafficDistributionGroupId` | ✓ | — | TDG that ACGR failover updates |
-| `LambdaSubnetIdA` | ✓ | — | First Lambda VPC subnet (also targeted by Experiment 2) |
-| `LambdaSubnetIdB` | ✓ | — | Second Lambda VPC subnet (also targeted by Experiment 2) |
-| `LambdaSecurityGroupId` | ✓ | — | Security group for the Lambda VPC config |
-| `LambdaCodeBucket` | ✓ | — | Pre-existing S3 bucket holding the Lambda `.zip` packages (under `connect-chaos/`) |
-| `FISExtensionLayerArn` | ✓ | — | AWS FIS Lambda extension layer ARN for this region |
-| `PrimaryRegion` | | `us-east-1` | Must form an ACGR-supported pair with `PairedRegion` (enforced by the template `Rules` block) |
-| `PairedRegion` | | `us-west-2` | — |
-| `EnableAutoFailover` | | `false` | Deploy the EventBridge rule + `TrafficShiftHandler` Lambda |
-| `EnableLexGlobalResiliency` | | `true` | Replicate the Lex bot via Lex GR (IAD↔PDX, LDN↔FRA). Set `false` for Tokyo↔Osaka |
-| `ReplicatedLexBotId` | | `''` | Paired region only — `LexBotId` output from the primary stack |
-| `ReplicatedLexBotAliasId` | | `''` | Paired region only — `LexBotAliasId` output from the primary stack |
-| `PairedConnectInstanceId` | | `''` | Primary region only, when `DashboardType=unified` |
-| `DashboardType` | | `regional` | `regional` (per-region) or `unified` (cross-region in primary) |
-| `EnableTrafficGenerator` | | `false` | Deploy the optional synthetic-traffic Lambda |
-| `ContactFlowErrorsThreshold` | | `5` | Experiment 2 alarm threshold |
-| `LexCodeHookLatencyThresholdMs` | | `7000` | Experiment 3 alarm threshold — `LexFulfillmentHandler` Duration (ms) |
-| `MissedCallsThreshold` | | `5` | Experiment 4 alarm threshold |
-| `FISExperimentDuration` | | `PT5M` | ISO-8601 duration for FIS experiments 1–3 |
+| `ConnectInstanceArn` | ✓ | — | ACGR instance ARN for **this** region |
+| `ConnectInstanceId` | ✓ | — | Instance UUID for **this** region |
+| `TrafficDistributionGroupId` | ✓ | — | TDG that failover updates |
+| `LambdaCodeBucket` | ✓ | — | Bucket holding the Lambda zips. `make` creates and fills it |
+| `CreateVpc` | | `true` | Create VPC + subnets + free DynamoDB/S3 gateway endpoints |
+| `VpcCidr` / `SubnetACidr` / `SubnetBCidr` | | `10.20.0.0/16`, `.1.0/24`, `.2.0/24` | Only when `CreateVpc=true` |
+| `LambdaSubnetIdA` / `IdB` / `LambdaSecurityGroupId` | | `''` | **Only when `CreateVpc=false`.** A Rule enforces all three |
+| `FISExtensionLayerArn` | | *SSM path* | Auto-resolves per region. Override only to pin a version |
+| `PrimaryRegion` / `PairedRegion` | | `us-east-1` / `us-west-2` | Must be an ACGR pair |
+| `EnableAutoFailover` | | `false` | Deploy EventBridge + `TrafficShiftHandler` |
+| `EnableLexGlobalResiliency` | | `true` | Replicate the bot via Lex GR (IAD↔PDX, LHR↔FRA) |
+| `ReplicatedLexBotId` / `…AliasId` | | `''` | Paired region only; from the primary stack outputs |
+| `EnableTrafficGenerator` | | `false` | Synthetic metrics — drive alarms without phone calls |
+| `DashboardType` | | `regional` | `regional` or `unified` |
+| `ContactFlowErrorsThreshold` | | `5` | Exp 2 |
+| `LexCodeHookLatencyThresholdMs` | | `7000` | Exp 3 |
+| `QueueWaitSecondsThreshold` | | `60` | Exp 4 |
+| `FISExperimentDuration` | | `PT5M` | ISO-8601 |
+| `PairedConnectInstanceId` | | `''` | Primary only, when `DashboardType=unified` |
 
 ---
 
 ## Deployment
 
-This template is designed for **CloudFormation StackSets** — a single template deployed to both the primary and paired regions. The `IsPrimaryRegion` condition controls what deploys where.
+### Which file do I deploy?
 
-### Step 1: Package Lambda Code
+**`cfn/main-template.yaml`** — the only deployable artifact.
 
-```bash
-cd lambda/
-zip lex_fulfillment_handler.zip lex_fulfillment_handler.py
-zip traffic_shift_handler.zip traffic_shift_handler.py
-
-# Upload to your pre-created S3 bucket in each region — the CFN template
-# expects all Lambda code under the `connect-chaos/` prefix.
-aws s3 cp lex_fulfillment_handler.zip s3://YOUR-BUCKET-NAME/connect-chaos/ --region us-east-1
-aws s3 cp traffic_shift_handler.zip s3://YOUR-BUCKET-NAME/connect-chaos/ --region us-east-1
-```
-
-### Step 2: Collect deployment parameter values
-
-Before running the deploy command, gather these values from your account. Replace `<your-instance-alias>`, `<your-bucket-iad>`, etc. with values from your environment. The shell variables defined here are referenced by the deploy commands in Step 3.
-
-```bash
-# Region pair (one of: us-east-1/us-west-2, eu-west-2/eu-central-1, ap-northeast-1/ap-northeast-3)
-PRIMARY_REGION=us-east-1
-PAIRED_REGION=us-west-2
-
-# Your AWS account ID
-ACCT=$(aws sts get-caller-identity --query Account --output text)
-
-# Connect instance ARN and ID — primary region
-PRIMARY_INSTANCE_ARN=$(aws connect list-instances --region $PRIMARY_REGION \
-  --query "InstanceSummaryList[?InstanceAlias=='<your-instance-alias>'].Arn | [0]" --output text)
-PRIMARY_INSTANCE_ID=$(echo $PRIMARY_INSTANCE_ARN | awk -F/ '{print $NF}')
-
-# Connect instance ARN and ID — paired region (auto-created by ACGR replication)
-PAIRED_INSTANCE_ARN=$(aws connect list-instances --region $PAIRED_REGION \
-  --query "InstanceSummaryList[?InstanceAlias=='<your-instance-alias>'].Arn | [0]" --output text)
-PAIRED_INSTANCE_ID=$(echo $PAIRED_INSTANCE_ARN | awk -F/ '{print $NF}')
-
-# Traffic Distribution Group (created during ACGR onboarding)
-TDG_ID=$(aws connect list-traffic-distribution-groups \
-  --instance-id $PRIMARY_INSTANCE_ID --region $PRIMARY_REGION \
-  --query "TrafficDistributionGroupSummaryList[0].Id" --output text)
-```
-
-Look up the remaining values manually:
-
-| Variable | Where to find it |
+| Path | Role |
 |---|---|
-| `LAMBDA_SUBNET_A_IAD`, `LAMBDA_SUBNET_B_IAD` | Two private subnets in your VPC in the primary region (Experiment 2 disrupts both for deterministic blast radius) |
-| `LAMBDA_SUBNET_A_PDX`, `LAMBDA_SUBNET_B_PDX` | Same, in the paired region |
-| `LAMBDA_SG_IAD`, `LAMBDA_SG_PDX` | Security group ID per region for the Lambda VPC config |
-| `LAMBDA_BUCKET_IAD`, `LAMBDA_BUCKET_PDX` | The bucket in each region where you uploaded the zips in Step 1 |
-| `FIS_LAYER_IAD`, `FIS_LAYER_PDX` | FIS Lambda extension layer ARN per region — see the [per-region catalog](https://docs.aws.amazon.com/fis/latest/userguide/actions-lambda-extension-arns.html) |
+| **`cfn/main-template.yaml`** | **The template.** Deployed once per region |
+| `lambda/*.py` | Zipped and uploaded by `make`; source of truth for the code |
+| `Makefile` | Creates the bucket, packages, uploads, deploys |
+| `RUNBOOK.md` | Step-by-step deploy + test guide |
+| `scripts/wire-paired-flow.sh` | Post-deploy, **only** if `EnableLexGlobalResiliency=false` |
+| `contact-flows/*.json` | Reference copies — **not deployed**. Live flows are inline in the template |
+| `docs/archive/` | Alternative experiment variants, **not wired in** |
+
+The same template deploys **twice**; `IsPrimaryRegion` controls what goes where. The global
+tables, both contact flows, the overflow queue and its hours of operation are created only
+in the primary region and replicated by ACGR / DynamoDB.
+
+### Recommended: deploy both regions in one command
 
 ```bash
-LAMBDA_SUBNET_A_IAD=<subnet-id>
-LAMBDA_SUBNET_B_IAD=<subnet-id>
-LAMBDA_SG_IAD=<sg-id>
-LAMBDA_BUCKET_IAD=<your-bucket-iad>
-FIS_LAYER_IAD=<fis-extension-layer-arn-iad>
+export ACCT=$(aws sts get-caller-identity --query Account --output text)
+export PRIMARY_REGION=us-east-1
+export PAIRED_REGION=us-west-2
 
-LAMBDA_SUBNET_A_PDX=<subnet-id>
-LAMBDA_SUBNET_B_PDX=<subnet-id>
-LAMBDA_SG_PDX=<sg-id>
-LAMBDA_BUCKET_PDX=<your-bucket-pdx>
-FIS_LAYER_PDX=<fis-extension-layer-arn-pdx>
+# ACGR replicas share the SAME instance id, so both ARNs differ only by region
+export PRIMARY_INSTANCE_ARN=arn:aws:connect:$PRIMARY_REGION:$ACCT:instance/<instance-id>
+export PAIRED_INSTANCE_ARN=arn:aws:connect:$PAIRED_REGION:$ACCT:instance/<instance-id>
+export TDG_ID=<traffic-distribution-group-id>
+
+make deploy-pair STACK=connect-chaos-sample \
+  PRIMARY_REGION=$PRIMARY_REGION PAIRED_REGION=$PAIRED_REGION \
+  PRIMARY_INSTANCE_ARN=$PRIMARY_INSTANCE_ARN \
+  PAIRED_INSTANCE_ARN=$PAIRED_INSTANCE_ARN \
+  TDG_ID=$TDG_ID
 ```
 
-### Step 3: Deploy via StackSet (Recommended)
+`deploy-pair` creates the code bucket, packages and uploads the Lambdas, deploys the primary
+region, reads the Lex GR bot/alias IDs from its outputs, then deploys the paired region with
+those IDs. **Both stacks are left standing** — required for the paired region to actually
+serve a call after failover.
 
-The top-level `--parameters` carry the **primary region's** values. The paired region's values are supplied via `--parameter-overrides` on `create-stack-instances`.
+### One region at a time
 
 ```bash
-aws cloudformation create-stack-set \
-  --stack-set-name connect-chaos-sample \
-  --template-body file://cfn/main-template.yaml \
-  --parameters \
-    ParameterKey=ConnectInstanceArn,ParameterValue=$PRIMARY_INSTANCE_ARN \
-    ParameterKey=ConnectInstanceId,ParameterValue=$PRIMARY_INSTANCE_ID \
-    ParameterKey=PrimaryRegion,ParameterValue=$PRIMARY_REGION \
-    ParameterKey=PairedRegion,ParameterValue=$PAIRED_REGION \
-    ParameterKey=TrafficDistributionGroupId,ParameterValue=$TDG_ID \
-    ParameterKey=EnableAutoFailover,ParameterValue=true \
-    ParameterKey=DashboardType,ParameterValue=regional \
-    ParameterKey=LambdaSubnetIdA,ParameterValue=$LAMBDA_SUBNET_A_IAD \
-    ParameterKey=LambdaSubnetIdB,ParameterValue=$LAMBDA_SUBNET_B_IAD \
-    ParameterKey=LambdaSecurityGroupId,ParameterValue=$LAMBDA_SG_IAD \
-    ParameterKey=LambdaCodeBucket,ParameterValue=$LAMBDA_BUCKET_IAD \
-    ParameterKey=FISExtensionLayerArn,ParameterValue=$FIS_LAYER_IAD \
-    ParameterKey=EnableLexGlobalResiliency,ParameterValue=true \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --permission-model SELF_MANAGED
-
-# Wait for the PRIMARY stack to reach CREATE_COMPLETE, then read the Lex IDs
-# that Lex Global Resiliency preserves in the paired region:
-LEX_BOT_ID=$(aws cloudformation describe-stacks \
-  --stack-name connect-chaos-sample --region $PRIMARY_REGION \
-  --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue" --output text)
-LEX_BOT_ALIAS_ID=$(aws cloudformation describe-stacks \
-  --stack-name connect-chaos-sample --region $PRIMARY_REGION \
-  --query "Stacks[0].Outputs[?OutputKey=='LexBotAliasId'].OutputValue" --output text)
-
-# Paired-region values are supplied as ParameterOverrides:
-aws cloudformation create-stack-instances \
-  --stack-set-name connect-chaos-sample \
-  --accounts $ACCT \
-  --regions $PRIMARY_REGION $PAIRED_REGION \
-  --parameter-overrides \
-    "[
-      {\"ParameterKey\":\"ConnectInstanceArn\",\"ParameterValue\":\"$PAIRED_INSTANCE_ARN\"},
-      {\"ParameterKey\":\"ConnectInstanceId\",\"ParameterValue\":\"$PAIRED_INSTANCE_ID\"},
-      {\"ParameterKey\":\"LambdaSubnetIdA\",\"ParameterValue\":\"$LAMBDA_SUBNET_A_PDX\"},
-      {\"ParameterKey\":\"LambdaSubnetIdB\",\"ParameterValue\":\"$LAMBDA_SUBNET_B_PDX\"},
-      {\"ParameterKey\":\"LambdaSecurityGroupId\",\"ParameterValue\":\"$LAMBDA_SG_PDX\"},
-      {\"ParameterKey\":\"LambdaCodeBucket\",\"ParameterValue\":\"$LAMBDA_BUCKET_PDX\"},
-      {\"ParameterKey\":\"FISExtensionLayerArn\",\"ParameterValue\":\"$FIS_LAYER_PDX\"},
-      {\"ParameterKey\":\"ReplicatedLexBotId\",\"ParameterValue\":\"$LEX_BOT_ID\"},
-      {\"ParameterKey\":\"ReplicatedLexBotAliasId\",\"ParameterValue\":\"$LEX_BOT_ALIAS_ID\"}
-    ]" \
-  --operation-preferences MaxConcurrentPercentage=100
+make deploy STACK=connect-chaos-sample REGION=$PRIMARY_REGION \
+  CONNECT_INSTANCE_ARN=$PRIMARY_INSTANCE_ARN \
+  CONNECT_INSTANCE_ID=<instance-id> TDG_ID=$TDG_ID
 ```
 
-### Alternative: Deploy Individually Per Region
+Then read `LexBotId` / `LexBotAliasId` from the primary outputs and pass them to the paired
+region as `REPLICATED_LEX_BOT_ID` / `REPLICATED_LEX_BOT_ALIAS_ID`.
 
-If you prefer not to use a StackSet, deploy the same template twice with `aws cloudformation deploy`. The variable names are identical to the section above.
+> **Tokyo/Osaka:** Lex GR does not support `ap-northeast-1`↔`ap-northeast-3`. Deploy both
+> with `ENABLE_LEX_GR=false`, omit the replicated IDs, then run
+> `./scripts/wire-paired-flow.sh` to point the paired flow at its own bot.
 
-> **Note:** the template is larger than CloudFormation's 51,200-byte inline limit, so `aws cloudformation deploy` needs an S3 staging bucket — add `--s3-bucket <your-bucket> --s3-prefix cfn-staging` to each command below (your `LambdaCodeBucket` works). For StackSets, use `--template-url` (S3) instead of `--template-body file://`.
+### Seed the test data
 
 ```bash
-# Primary region (creates the Lex bot; Global Resiliency replicates it to paired)
-aws cloudformation deploy \
-  --template-file cfn/main-template.yaml \
-  --stack-name connect-chaos-sample \
-  --parameter-overrides \
-    ConnectInstanceArn=$PRIMARY_INSTANCE_ARN \
-    ConnectInstanceId=$PRIMARY_INSTANCE_ID \
-    PrimaryRegion=$PRIMARY_REGION \
-    PairedRegion=$PAIRED_REGION \
-    TrafficDistributionGroupId=$TDG_ID \
-    EnableAutoFailover=true \
-    LambdaSubnetIdA=$LAMBDA_SUBNET_A_IAD \
-    LambdaSubnetIdB=$LAMBDA_SUBNET_B_IAD \
-    LambdaSecurityGroupId=$LAMBDA_SG_IAD \
-    LambdaCodeBucket=$LAMBDA_BUCKET_IAD \
-    FISExtensionLayerArn=$FIS_LAYER_IAD \
-    EnableLexGlobalResiliency=true \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region $PRIMARY_REGION
-
-# Read Lex bot IDs from primary stack outputs (Lex GR preserves these in the replica)
-LEX_BOT_ID=$(aws cloudformation describe-stacks \
-  --stack-name connect-chaos-sample --region $PRIMARY_REGION \
-  --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue" --output text)
-LEX_BOT_ALIAS_ID=$(aws cloudformation describe-stacks \
-  --stack-name connect-chaos-sample --region $PRIMARY_REGION \
-  --query "Stacks[0].Outputs[?OutputKey=='LexBotAliasId'].OutputValue" --output text)
-
-# Paired region (imports the replicated Lex bot — does NOT create a new bot)
-aws cloudformation deploy \
-  --template-file cfn/main-template.yaml \
-  --stack-name connect-chaos-sample \
-  --parameter-overrides \
-    ConnectInstanceArn=$PAIRED_INSTANCE_ARN \
-    ConnectInstanceId=$PAIRED_INSTANCE_ID \
-    PrimaryRegion=$PRIMARY_REGION \
-    PairedRegion=$PAIRED_REGION \
-    TrafficDistributionGroupId=$TDG_ID \
-    EnableAutoFailover=true \
-    LambdaSubnetIdA=$LAMBDA_SUBNET_A_PDX \
-    LambdaSubnetIdB=$LAMBDA_SUBNET_B_PDX \
-    LambdaSecurityGroupId=$LAMBDA_SG_PDX \
-    LambdaCodeBucket=$LAMBDA_BUCKET_PDX \
-    FISExtensionLayerArn=$FIS_LAYER_PDX \
-    EnableLexGlobalResiliency=true \
-    ReplicatedLexBotId=$LEX_BOT_ID \
-    ReplicatedLexBotAliasId=$LEX_BOT_ALIAS_ID \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region $PAIRED_REGION
+aws dynamodb put-item --table-name ConnectChaosCustomers --region $PRIMARY_REGION \
+  --item '{"account_id":{"S":"12345"},"customer_name":{"S":"John Doe"}}'
+aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
 ```
 
-> **Note (Tokyo/Osaka pair):** Lex Global Resiliency is not available for `ap-northeast-1`↔`ap-northeast-3`. For that pair, set `EnableLexGlobalResiliency=false` and deploy the Lex bot independently in each region (omit the `ReplicatedLexBot*` parameters), then run `scripts/wire-paired-flow.sh` to point the paired-region contact flow at its independent Lex alias.
+---
 
-### Step 4: Seed DynamoDB with Test Data
+## Operational constraints
 
-```bash
-aws dynamodb put-item \
-  --table-name ConnectChaosCustomers \
-  --item '{"account_id": {"S": "12345"}, "customer_name": {"S": "John Doe"}}' \
-  --region us-east-1
+Real behaviours you must account for. None are template bugs.
 
-aws dynamodb put-item \
-  --table-name ConnectChaosConfig \
-  --item '{"config_key": {"S": "chaos_flag"}, "enabled": {"BOOL": false}}' \
-  --region us-east-1
-```
+### The FIS Lambda extension has a ~180 s config-freshness window (Exp 1 & 3)
+
+Experiments 1 and 3 work through the FIS Lambda extension layer, which reads its fault
+config from S3, polls roughly every 60 s, and **ignores config older than ~180 s**.
+
+- A real call must land **within ~3 minutes** of starting the experiment, or the invocation
+  runs normally with no fault applied.
+- If you miss the window, restart the experiment and call again promptly.
+
+Experiment 2 is network-level and has **no such window**.
+
+### The template exceeds CloudFormation's inline limit
+
+At ~65 KB it is over the 51,200-byte `TemplateBody` limit, so deploys must stage it through
+S3. `make deploy` does this automatically via `--s3-bucket`. For StackSets use
+`--template-url`.
+
+### A failed first-create is auto-deleted
+
+`aws cloudformation deploy` rolls back and deletes a brand-new stack that fails, discarding
+the events you need. To keep it for inspection use
+`aws cloudformation create-stack --on-failure DO_NOTHING`, read
+`describe-stack-events`, then delete manually.
+
+### Every fault also raises `AWS/Lambda Errors`
+
+See the cascade note in the Overview. Watch the specific experiment's alarm.
 
 ---
 
 ## Running Experiments
 
-### Experiment 1: Lambda Failure
+Full procedure with verification and the mandatory reset step: **[RUNBOOK.md](RUNBOOK.md)**.
+
 ```bash
-aws fis start-experiment \
-  --experiment-template-id $(aws cloudformation describe-stacks \
-    --stack-name connect-chaos-sample \
-    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment1`].OutputValue' \
-    --output text --region us-east-1) \
-  --region us-east-1
+get_out () { aws cloudformation describe-stacks --stack-name connect-chaos-sample \
+  --region $1 --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text; }
+
+aws fis start-experiment --region $PRIMARY_REGION \
+  --experiment-template-id $(get_out $PRIMARY_REGION FISExperiment1)   # Exp 1
+aws fis start-experiment --region $PRIMARY_REGION \
+  --experiment-template-id $(get_out $PRIMARY_REGION FISExperiment2)   # Exp 2
+aws fis start-experiment --region $PRIMARY_REGION \
+  --experiment-template-id $(get_out $PRIMARY_REGION FISExperiment3)   # Exp 3
 ```
 
-### Experiment 2: DDB Network Disruption
+Experiment 4 is a flag, not a FIS experiment:
+
 ```bash
-aws fis start-experiment \
-  --experiment-template-id $(aws cloudformation describe-stacks \
-    --stack-name connect-chaos-sample \
-    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment2`].OutputValue' \
-    --output text --region us-east-1) \
-  --region us-east-1
+# enable
+aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":true}}'
+# disable — this does NOT expire on its own
+aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
 ```
 
-### Experiment 3: Lex Timeout
-```bash
-aws fis start-experiment \
-  --experiment-template-id $(aws cloudformation describe-stacks \
-    --stack-name connect-chaos-sample \
-    --query 'Stacks[0].Outputs[?OutputKey==`FISExperiment3`].OutputValue' \
-    --output text --region us-east-1) \
-  --region us-east-1
-```
-
-### Experiment 4: Custom Chaos Flag
-```bash
-# Enable chaos
-aws dynamodb put-item \
-  --table-name ConnectChaosConfig \
-  --item '{"config_key": {"S": "chaos_flag"}, "enabled": {"BOOL": true}}' \
-  --region us-east-1
-
-# Disable chaos (recovery)
-aws dynamodb put-item \
-  --table-name ConnectChaosConfig \
-  --item '{"config_key": {"S": "chaos_flag"}, "enabled": {"BOOL": false}}' \
-  --region us-east-1
-```
+Each FIS experiment's stop condition is its **own** alarm, so it halts as soon as it
+succeeds. Failover still fires — the alarm and EventBridge act independently.
 
 ---
 
 ## Synthetic Traffic Generator (Optional)
 
-The sample includes an **optional** synthetic traffic generator that emits CloudWatch metric data points simulating real Connect call traffic. This lets you:
-
-- Test alarm thresholds without placing actual phone calls
-- Validate the failover chain (Composite Alarm → EventBridge → TrafficShift)
-- Demo the experiment workflow in environments where telephony isn't configured
-
-### Enabling
-
-Set `EnableTrafficGenerator=true` when deploying:
+Set `EnableTrafficGenerator=true` (the `make` targets default it to `true`) to drive every
+alarm without placing phone calls. Deploys `ConnectChaos-TrafficGenerator-{region}` plus a
+**disabled** EventBridge schedule.
 
 ```bash
---parameter-overrides EnableTrafficGenerator=true
+GEN=ConnectChaos-TrafficGenerator-$PRIMARY_REGION
+
+aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
+  --payload '{"mode":"healthy","count":10}' /dev/stdout
+
+# Exp 1 | Exp 2 | Exp 3 | Exp 4 | everything
+--payload '{"mode":"faulty","fault_type":"lambda","count":10}'
+--payload '{"mode":"faulty","fault_type":"dynamodb","count":10}'
+--payload '{"mode":"faulty","fault_type":"lex","count":10}'
+--payload '{"mode":"faulty","fault_type":"flow","count":10}'
+--payload '{"mode":"faulty","fault_type":"all","count":10}'
 ```
 
-This deploys:
-- `ConnectChaos-TrafficGenerator-{region}` Lambda
-- EventBridge rule (deployed **DISABLED** — enable manually when ready)
+The generator emits metrics with the **same namespaces and dimensions** as real traffic, so
+CloudWatch cannot distinguish them and the full alarm → failover chain fires.
 
-### Usage
-
-#### Generate baseline (healthy) traffic
-```bash
-# One-shot: 10 data points of healthy metrics
-aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
-  --payload '{"mode": "healthy", "count": 10}' /dev/stdout
-
-# Continuous: enable the EventBridge schedule (emits every minute)
-aws events enable-rule --name ConnectChaos-TrafficGen-Schedule-us-east-1 --region us-east-1
-```
-
-#### Simulate a fault (trigger alarms)
-```bash
-# Simulate Experiment 1: Lambda errors
-aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
-  --payload '{"mode": "faulty", "fault_type": "lambda", "count": 10}' /dev/stdout
-
-# Simulate Experiment 2: ContactFlowErrors
-aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
-  --payload '{"mode": "faulty", "fault_type": "dynamodb", "count": 10}' /dev/stdout
-
-# Simulate Experiment 3: Lex code-hook latency (emits high LexFulfillmentHandler Duration)
-aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
-  --payload '{"mode": "faulty", "fault_type": "lex", "count": 10}' /dev/stdout
-
-# Simulate Experiment 4: MissedCalls
-aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
-  --payload '{"mode": "faulty", "fault_type": "flow", "count": 10}' /dev/stdout
-
-# Simulate ALL faults at once
-aws lambda invoke --function-name ConnectChaos-TrafficGenerator-us-east-1 \
-  --payload '{"mode": "faulty", "fault_type": "all", "count": 10}' /dev/stdout
-```
-
-### How It Works
-
-The traffic generator uses the CloudWatch `PutMetricData` API to emit metrics in the same namespaces and with the same dimensions as real Connect/Lambda/Lex traffic. CloudWatch alarms cannot distinguish these from real metrics — so the full alarm → failover chain triggers exactly as it would with real calls.
-
-> **⚠️ Note:** Synthetic metrics are indistinguishable from real ones in your CloudWatch dashboard. Disable the schedule and stop invoking the generator when you're done testing to avoid contaminating production metrics.
-
-### Packaging
-
-```bash
-cd lambda/
-zip traffic_generator.zip traffic_generator.py
-aws s3 cp traffic_generator.zip s3://YOUR-BUCKET-NAME/connect-chaos/ --region us-east-1
-```
+> **⚠️** Synthetic points are indistinguishable from real ones on your dashboard. Stop the
+> generator and disable the schedule when finished.
+>
+> **Note on `fault_type=lex`:** it emits `RuntimeLambdaErrors` under `RecognizeUtterance`,
+> which is *not* what a real Connect voice call produces. It exercises the metric, but
+> Experiment 3's real-call signal is Lambda `Duration`.
 
 ---
 
 ## Monitoring
 
-Open the CloudWatch Dashboard: `ConnectChaos-Monitoring-{region}`
+Dashboard `ConnectChaos-{region}`:
 
-The dashboard shows four panels — one per experiment:
-1. **Lambda Errors** (AWS/Lambda)
-2. **ContactFlowErrors** (AWS/Connect)
-3. **RuntimeLambdaErrors** (AWS/Lex)
-4. **MissedCalls** (AWS/Connect)
+1. **Exp 1** — Lambda `Errors`
+2. **Exp 2** — `ContactFlowErrors` (summed across both flow names)
+3. **Exp 3** — `LexFulfillmentHandler` `Duration` (Maximum, ms)
+4. **Exp 4** — `LongestQueueWaitTime` on `ConnectChaos-Overflow` (Maximum, sec)
 
-Plus a composite alarm status widget showing overall health.
+An `AlarmNotificationTopic` SNS topic fires on composite alarm and OK. Subscribe an email
+in the console — no subscription is pre-created because it would need confirmation.
 
 ---
 
 ## Cost
 
-This sample uses the following services which incur charges:
+| Service | Driver |
+|---------|--------|
+| Amazon Connect | Per-minute telephony + daily active use |
+| AWS FIS | ~$0.10 per action-minute |
+| Lambda | Invocations + duration (negligible) |
+| DynamoDB | On-demand R/W (negligible) |
+| CloudWatch | 5 alarms ≈ $0.50/mo + dashboard $3/mo |
+| Lex V2 | Per request during testing |
+| S3 | FIS config + template staging (< $0.01/mo) |
+| **VPC** | **$0** — gateway endpoints are free, no NAT gateway is created |
 
-| Service | Cost Driver |
-|---------|-------------|
-| Amazon Connect | Per-minute telephony + daily active use charges (for testing) |
-| AWS FIS | Per experiment-minute (~$0.10/action-minute) |
-| Lambda | Invocations + duration (negligible for testing) |
-| DynamoDB | On-demand R/W units (negligible for testing) |
-| CloudWatch | Alarms ($0.10/alarm/month × 5) + Dashboard ($3/month) |
-| Lex V2 | Per voice/text request during testing |
-| S3 | FIS config storage (< $0.01/month) |
-
-**Estimated cost for running all 4 experiments once:** < $5 (excluding telephony charges for test calls).
-
-**Ongoing retention cost** (if stacks remain deployed between experiments): ~$80–120/month across both regions (primarily CloudWatch alarms, dashboards, Lambda provisioned concurrency if enabled, and DynamoDB on-demand capacity).
-
-Run `cleanup` after testing to avoid ongoing charges.
+**All experiments once:** < $5, excluding telephony. **Left standing:** roughly
+$10–15/month per region, mostly dashboards and alarms.
 
 ---
 
 ## Security
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
-
-### Important Considerations
-
-- **This is a sample for testing/demonstration only.** Do NOT run FIS experiments against production contact centers without thorough planning and blast-radius controls.
-- **FIS stop conditions** are configured on all experiments — each experiment auto-stops if its own component alarm fires.
-- **IAM roles** are scoped to the minimum required permissions. Review them before deploying.
-- **VPC Lambda** is used for network-level experiments (Experiment 2). Ensure your security group allows outbound access to DynamoDB and CloudWatch endpoints.
-- **FIS extension layer** has access to S3 configuration — the S3 bucket is restricted to the FIS execution role and Lambda execution role only.
+- **Sample only.** Do not run FIS experiments against a production contact centre without
+  blast-radius planning.
+- Every experiment has a **stop condition** tied to its own alarm.
+- The created VPC has **no internet gateway and no NAT** — only free gateway endpoints to
+  DynamoDB and S3.
+- The FIS config bucket blocks all public access; only the FIS and Lambda execution roles
+  can reach it.
+- IAM roles are least-privilege. Review before deploying.
 
 ---
 
 ## Cleanup
 
-> **Important:** S3 buckets created by this stack (the FIS config bucket, named `connect-chaos-fis-${ACCOUNT}-${REGION}-${STACK}`) must be **emptied first** — CloudFormation cannot delete a non-empty bucket and the stack will fail with `DELETE_FAILED`.
+> The FIS config bucket (`ccfis-{account}-{region}-{stack}`) must be **emptied first** —
+> CloudFormation cannot delete a non-empty bucket and the stack will hit `DELETE_FAILED`.
 
 ```bash
-# 1. Empty the FIS config buckets in BOTH regions
-PRIMARY_REGION=us-east-1
-PAIRED_REGION=us-west-2
 ACCT=$(aws sts get-caller-identity --query Account --output text)
 STACK=connect-chaos-sample
 
-aws s3 rm "s3://connect-chaos-fis-${ACCT}-${PRIMARY_REGION}-${STACK}/" --recursive --region $PRIMARY_REGION
-aws s3 rm "s3://connect-chaos-fis-${ACCT}-${PAIRED_REGION}-${STACK}/" --recursive --region $PAIRED_REGION
+for R in $PAIRED_REGION $PRIMARY_REGION; do
+  aws s3 rm "s3://ccfis-${ACCT}-${R}-${STACK}/" --recursive --region $R
+done
 
-# 2. Optional: clear the Lambda code bucket if it was a one-off for this sample
-# aws s3 rm s3://YOUR-BUCKET-NAME/connect-chaos/ --recursive --region $PRIMARY_REGION
+# delete PAIRED first, then PRIMARY
+aws cloudformation delete-stack --stack-name $STACK --region $PAIRED_REGION
+aws cloudformation wait stack-delete-complete --stack-name $STACK --region $PAIRED_REGION
+aws cloudformation delete-stack --stack-name $STACK --region $PRIMARY_REGION
 
-# 3. Delete the stacks/StackSet
-
-# If deployed via StackSet:
-aws cloudformation delete-stack-instances \
-  --stack-set-name connect-chaos-sample \
-  --accounts $ACCT \
-  --regions $PRIMARY_REGION $PAIRED_REGION \
-  --no-retain-stacks
-
-aws cloudformation delete-stack-set \
-  --stack-set-name connect-chaos-sample
-
-# If deployed individually (delete paired BEFORE primary):
-aws cloudformation delete-stack --stack-name connect-chaos-sample --region $PAIRED_REGION
-aws cloudformation wait stack-delete-complete --stack-name connect-chaos-sample --region $PAIRED_REGION
-aws cloudformation delete-stack --stack-name connect-chaos-sample --region $PRIMARY_REGION
+# optional: the code/staging bucket
+# aws s3 rb s3://connect-chaos-code-${ACCT}-${PRIMARY_REGION} --force --region $PRIMARY_REGION
 ```
 
-> **Note:** Delete the paired region stack first, then primary. DynamoDB Global Tables must be deleted from the region where they were created (primary). If you set `EnableLexGlobalResiliency=true`, the Lex GR replica is deleted automatically when the primary bot is deleted.
+Paired before primary: the DynamoDB global tables are owned by the primary stack. With Lex
+GR enabled, the replica bot is removed when the primary bot is deleted.
 
 ---
 
@@ -583,68 +441,61 @@ aws cloudformation delete-stack --stack-name connect-chaos-sample --region $PRIM
 
 | Decision | Rationale |
 |----------|-----------|
-| One metric per experiment | Each component's failure is independently observable — no duplicate/cascading alarm noise |
-| FIS native actions only (Exp 1–3) | No custom chaos libraries or Lambda extensions needed beyond the AWS FIS layer |
-| Custom logic for Exp 4 only | Contact flow failures cannot be injected by FIS directly — DDB flag is simplest workaround |
-| Composite Alarm → EventBridge → Lambda | Clean, event-driven failover — no polling |
-| TrafficShift Lambda in BOTH regions | Each region can independently detect failure and shift traffic away from itself |
-| ACGR auto-replicates flows | No need to deploy contact flows separately to paired region |
-| DDB Global Table for chaos config | Chaos flag propagates to paired region automatically |
-| Lex Global Resiliency as default | Lex GR replicates the bot from primary to paired region (IAD↔PDX, LDN↔FRA). For Tokyo↔Osaka (not supported by Lex GR), the bot deploys independently per region. |
-| StackSet deployment model | Single template, parallel deployment to both regions — no custom cross-region orchestration |
+| Attributing metric per experiment, not isolation | All faults also raise `Lambda Errors`; only each experiment's own metric names the cause |
+| Exp 3 uses Lambda `Duration`, not `RuntimeLambdaErrors` | That Lex metric is never emitted on Connect's real `StartConversation` voice path (FIXES.md Fix 7) |
+| Exp 2 invokes a call-logger directly from the flow | Otherwise `ContactFlowErrors` never fired and Exp 2 only rode the Lambda-Errors alarm (Fix 6) |
+| Exp 4 uses a no-agent queue + `LongestQueueWaitTime` | `MissedCalls` needs a staffed agent to deliberately not answer — not reproducible |
+| `$.AwsRegion` in the flow's Lex ARN | ACGR replicates flow content verbatim; a hardcoded region makes the paired region call the **primary's** bot, defeating failover |
+| Explicit `IntegrationAssociation` per region | A Lex bot must be associated with the instance before a flow can invoke it (Fix 5) |
+| `CreateVpc=true` with free gateway endpoints | Removes the VPC prerequisite at no cost. S3 reachability is mandatory — the FIS extension reads its config from S3 |
+| FIS layer ARN from public SSM | Both the publishing account **and** version differ per region, so a hand-copied ARN fails silently |
+| Composite alarm has explicit `DependsOn` | The rule names children in a `!Sub` literal, so CloudFormation cannot infer the dependency and creation races (Fix 1) |
+| Manual recovery | An operator should confirm the fault is resolved before customers are routed back |
 
 ---
 
-## `contact-flows/` Directory
+## Directories
 
-The `contact-flows/` directory contains **reference copies** of the Contact Flow JSON for readability. The actual flows are deployed inline in the CloudFormation template (`AWS::Connect::ContactFlow` resources). These reference files are not used during deployment.
-
----
-
-## `scripts/` Directory
-
-| Script | When to run |
+| Path | Purpose |
 |---|---|
-| `scripts/wire-paired-flow.sh` | Only when `EnableLexGlobalResiliency=false` (currently `ap-northeast-1` ↔ `ap-northeast-3`). Rewrites the paired-region copies of the contact flows to reference the paired-region Lex alias. Run after both stacks reach `CREATE_COMPLETE`. |
-
-```bash
-./scripts/wire-paired-flow.sh \
-  --stack-name connect-chaos-sample \
-  --primary-region ap-northeast-1 \
-  --paired-region ap-northeast-3
-```
+| `cfn/` | The deployable template |
+| `lambda/` | Function source — zipped and uploaded by `make` |
+| `contact-flows/` | Reference JSON copies (not deployed) |
+| `scripts/` | `wire-paired-flow.sh`, needed only when Lex GR is off |
+| `docs/` | Architecture diagram + source |
+| `docs/archive/` | Alternative experiment variants, not wired in — see its README |
 
 ---
 
 ## Tooling
 
-### `make` targets
-
-A `Makefile` is provided to simplify the package + upload + deploy cycle:
-
 ```bash
-make package                                    # zip all Lambdas
-make upload BUCKET=my-bucket REGION=us-east-1   # upload to S3 (correct prefix)
-make deploy STACK=connect-chaos-sample REGION=us-east-1 \
-  CONNECT_INSTANCE_ARN=... CONNECT_INSTANCE_ID=... \
-  LAMBDA_SUBNET_A=subnet-aaa LAMBDA_SUBNET_B=subnet-bbb \
-  LAMBDA_SG=sg-ccc TDG_ID=tdg-xyz \
-  FIS_LAYER=arn:aws:lambda:us-east-1:...:layer:aws-fis-extension:1 \
-  CODE_BUCKET=my-bucket
-make lint                                       # run cfn-lint, bash -n, py_compile
+make bucket   REGION=us-east-1     # create the code/staging bucket (idempotent)
+make package                       # zip all four Lambdas
+make bootstrap REGION=us-east-1    # bucket + package + upload
+make deploy      STACK=... REGION=... CONNECT_INSTANCE_ARN=... CONNECT_INSTANCE_ID=... TDG_ID=...
+make deploy-pair STACK=... PRIMARY_REGION=... PAIRED_REGION=... \
+                 PRIMARY_INSTANCE_ARN=... PAIRED_INSTANCE_ARN=... TDG_ID=...
+make lint                          # cfn-lint, bash -n, py_compile, JSON parse
 make clean
 ```
 
-### CI
+Run `make lint` before committing. There is no CI in this repo; validation is local.
 
-A GitHub Actions workflow at `.github/workflows/lint.yml` runs `cfn-lint`, bash syntax checks, Python compile checks, and JSON parse checks on every push/PR.
+`-i W1030` is expected: the `ReplicatedLexBot*` parameters are intentionally empty in
+primary-region deploys.
 
-### Integration testing
+---
 
-A `.taskcat.yml` is provided for integration-testing across both regions. It expects prerequisite resource IDs (Connect instance ARN, VPC subnets, FIS layer ARN, etc.) to be stored as SSM parameters under `/taskcat/...`. taskcat will not provision these prerequisites — they must exist in the target sandbox account first. See [taskcat docs](https://github.com/aws-ia/taskcat) for details.
+## Known findings
+
+[FIXES.md](FIXES.md) records every defect found by deploying this against a real
+ACGR-paired instance, the fix applied, and the things that are **not** bugs. Read it before
+changing an experiment's metric — several obvious-looking "fixes" have already been proven
+wrong by real calls.
 
 ---
 
 ## License
 
-This sample is provided under the MIT-0 license. See [LICENSE](LICENSE) file.
+MIT-0. See [LICENSE](LICENSE).

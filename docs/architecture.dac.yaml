@@ -1,6 +1,10 @@
 # Source for docs/architecture.png — render with the AWS Diagram-as-Code CLI:
 #   awsdac docs/architecture.dac.yaml --output docs/architecture.png
 #
+# Each region also creates a small VPC with two private subnets and FREE
+# gateway endpoints to DynamoDB and S3 (the FIS Lambda extension reads its
+# fault config from S3). No NAT gateway, no internet gateway.
+#
 # Reflects the shipping template: ACGR-paired primary/paired regions, Lex
 # Global Resiliency as the default cross-region bot replication, a per-region
 # FIS config bucket feeding the FIS Lambda extension, four chaos experiments
@@ -49,7 +53,7 @@ Diagram:
       Title: "Connect + Contact Flows"
     PrimaryLex:
       Type: AWS::Lex::Bot
-      Title: "Lex V2 Bot"
+      Title: "Lex V2 Bot (source)"
     PrimaryLambda:
       Type: AWS::Lambda::Function
       Title: "LexFulfillmentHandler (FIS extension)"
@@ -58,13 +62,13 @@ Diagram:
       Title: "FIS config bucket"
     PrimaryFIS:
       Type: AWS::Lambda::Function
-      Title: "3 FIS experiments"
+      Title: "3 FIS experiments + chaos flag"
     PrimaryDDB:
       Type: AWS::DynamoDB::Table
-      Title: "Customers + ChaosConfig (Global)"
+      Title: "Customers + Config + CallLog (global tables)"
     PrimaryAlarms:
       Type: AWS::CloudWatch::Alarm
-      Title: "4 component alarms"
+      Title: "4 alarms: LambdaErrors, ContactFlowErrors, CodeHookLatency, QueueWait"
     PrimaryComposite:
       Type: AWS::CloudWatch::Alarm
       Title: "Composite alarm"
@@ -90,13 +94,13 @@ Diagram:
       Title: "FIS config bucket"
     PairedFIS:
       Type: AWS::Lambda::Function
-      Title: "3 FIS experiments"
+      Title: "3 FIS experiments + chaos flag"
     PairedDDB:
       Type: AWS::DynamoDB::Table
-      Title: "Customers + ChaosConfig (Global)"
+      Title: "Customers + Config + CallLog (global tables)"
     PairedAlarms:
       Type: AWS::CloudWatch::Alarm
-      Title: "4 component alarms"
+      Title: "4 alarms: LambdaErrors, ContactFlowErrors, CodeHookLatency, QueueWait"
     PairedComposite:
       Type: AWS::CloudWatch::Alarm
       Title: "Composite alarm"
