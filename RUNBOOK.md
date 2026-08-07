@@ -60,12 +60,12 @@ aws connect list-phone-numbers-v2 --region $PRIMARY_REGION --max-results 60 \
   --output table
 ```
 
-Also confirm `ConnectChaosCustomers` does **not** already exist in the primary region — an
+Also confirm `$STACK-Customers` does **not** already exist in the primary region — an
 existing table would be adopted or conflict:
 
 ```bash
 aws dynamodb list-tables --region $PRIMARY_REGION \
-  --query "TableNames[?contains(@,'ConnectChaos')]"
+  --query "TableNames[?contains(@,'$STACK')]"
 ```
 
 ---
@@ -132,13 +132,13 @@ aws lambda list-functions --region $PAIRED_REGION \
 ## 3. Seed data and baseline
 
 ```bash
-aws dynamodb put-item --table-name ConnectChaosCustomers --region $PRIMARY_REGION \
+aws dynamodb put-item --table-name $STACK-Customers --region $PRIMARY_REGION \
   --item '{"account_id":{"S":"12345"},"customer_name":{"S":"John Doe"}}'
-aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
 
 # prove global-table replication works
-aws dynamodb get-item --table-name ConnectChaosCustomers --region $PAIRED_REGION \
+aws dynamodb get-item --table-name $STACK-Customers --region $PAIRED_REGION \
   --key '{"account_id":{"S":"12345"}}'
 ```
 
@@ -323,7 +323,7 @@ can ever receive its contacts) and transfers the contact there.
 `ConnectChaos-QueueWait-{region}` ALARM.
 
 ```bash
-aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":true}}'
 ```
 
@@ -351,7 +351,7 @@ aws cloudwatch get-metric-statistics --namespace AWS/Connect \
 **Turn the flag off — it does not expire:**
 
 ```bash
-aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
 ```
 

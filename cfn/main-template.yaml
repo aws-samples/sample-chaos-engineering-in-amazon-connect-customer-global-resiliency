@@ -287,11 +287,20 @@ Resources:
   # PRIMARY REGION ONLY
   # ═══════════════════════════════════════════════════════════
 
+  # ── DynamoDB global tables ──
+  # Names are scoped to the stack name (<StackName>-Customers etc.) because DynamoDB
+  # GLOBAL TABLE NAMES ARE ACCOUNT-GLOBAL. With hardcoded names a second deployment of
+  # this sample in the same account fails with:
+  #   "Global table with name: 'ConnectChaosConfig' already exists with replicas in
+  #    regions: '[...]'"
+  # Scoping by stack name lets independent deployments (for example a dev and a prod
+  # ACGR pair) coexist. The Lambdas read the resolved names from environment variables,
+  # so nothing depends on the literal names.
   CustomerTable:
     Type: AWS::DynamoDB::GlobalTable
     Condition: IsPrimaryRegion
     Properties:
-      TableName: ConnectChaosCustomers
+      TableName: !Sub '${AWS::StackName}-Customers'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: account_id
@@ -319,7 +328,7 @@ Resources:
     Type: AWS::DynamoDB::GlobalTable
     Condition: IsPrimaryRegion
     Properties:
-      TableName: ConnectChaosCallLog
+      TableName: !Sub '${AWS::StackName}-CallLog'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: contact_id
@@ -346,7 +355,7 @@ Resources:
     Type: AWS::DynamoDB::GlobalTable
     Condition: IsPrimaryRegion
     Properties:
-      TableName: ConnectChaosConfig
+      TableName: !Sub '${AWS::StackName}-Config'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: config_key
@@ -636,8 +645,8 @@ Resources:
               - Effect: Allow
                 Action: [dynamodb:GetItem]
                 Resource:
-                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ConnectChaosCustomers'
-                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ConnectChaosConfig'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}-Customers'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}-Config'
         - PolicyName: FISConfigRead
           PolicyDocument:
             Version: '2012-10-17'
@@ -677,7 +686,7 @@ Resources:
               - Effect: Allow
                 Action: [dynamodb:PutItem]
                 Resource:
-                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ConnectChaosCallLog'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}-CallLog'
 
   FISExecutionRole:
     Type: AWS::IAM::Role
@@ -898,8 +907,8 @@ Resources:
         - !Ref FISExtensionLayerArn
       Environment:
         Variables:
-          CUSTOMER_TABLE_NAME: ConnectChaosCustomers
-          CHAOS_TABLE_NAME: ConnectChaosConfig
+          CUSTOMER_TABLE_NAME: !Sub '${AWS::StackName}-Customers'
+          CHAOS_TABLE_NAME: !Sub '${AWS::StackName}-Config'
           AWS_FIS_CONFIGURATION_LOCATION: !Sub '${FISConfigBucket.Arn}/FisConfigs/'
           AWS_LAMBDA_EXEC_WRAPPER: /opt/aws-fis/bootstrap
       VpcConfig:
@@ -953,7 +962,7 @@ Resources:
         S3Key: connect-chaos/call_logger.zip
       Environment:
         Variables:
-          CALL_LOG_TABLE_NAME: ConnectChaosCallLog
+          CALL_LOG_TABLE_NAME: !Sub '${AWS::StackName}-CallLog'
       VpcConfig:
         SubnetIds:
           - !If [MakeVpc, !Ref ChaosSubnetA, !Ref LambdaSubnetIdA]

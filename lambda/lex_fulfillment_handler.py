@@ -40,8 +40,8 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Environment variables set by CFN
-TABLE_NAME = os.environ.get('CUSTOMER_TABLE_NAME', 'ConnectChaosCustomers')
-CHAOS_TABLE_NAME = os.environ.get('CHAOS_TABLE_NAME', 'ConnectChaosConfig')
+TABLE_NAME = os.environ['CUSTOMER_TABLE_NAME']
+CHAOS_TABLE_NAME = os.environ['CHAOS_TABLE_NAME']
 
 # Short, bounded DynamoDB timeouts so Experiment 2 (network disruption) fails FAST
 # and CATCHABLY instead of hanging until the 8s Lambda timeout. If the DDB call

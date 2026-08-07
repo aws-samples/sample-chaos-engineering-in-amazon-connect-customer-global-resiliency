@@ -15,7 +15,7 @@ customer is serviced. Writing it keyed on the Connect ContactId with the caller'
 number, the dialed number, channel, and a timestamp is a typical "first block in
 the flow" pattern.
 
-The table (ConnectChaosCallLog) is a DynamoDB Global Table, so call records written
+The table (<StackName>-CallLog, from CALL_LOG_TABLE_NAME) is a DynamoDB Global Table, so call records written
 in the primary region are replicated to the paired region — after ACGR fails
 telephony over, the receiving region still has (and keeps appending to) the same
 call log.
@@ -67,7 +67,7 @@ from botocore.config import Config
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-TABLE_NAME = os.environ.get('CALL_LOG_TABLE_NAME', 'ConnectChaosCallLog')
+TABLE_NAME = os.environ['CALL_LOG_TABLE_NAME']
 REGION = os.environ.get('AWS_REGION', 'unknown')
 
 # Retain call-log records for 90 days via a DynamoDB TTL attribute (expires_at).

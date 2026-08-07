@@ -259,9 +259,9 @@ region as `REPLICATED_LEX_BOT_ID` / `REPLICATED_LEX_BOT_ALIAS_ID`.
 ### Seed the test data
 
 ```bash
-aws dynamodb put-item --table-name ConnectChaosCustomers --region $PRIMARY_REGION \
+aws dynamodb put-item --table-name $STACK-Customers --region $PRIMARY_REGION \
   --item '{"account_id":{"S":"12345"},"customer_name":{"S":"John Doe"}}'
-aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
 ```
 
@@ -321,10 +321,10 @@ Experiment 4 is a flag, not a FIS experiment:
 
 ```bash
 # enable
-aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":true}}'
 # disable — this does NOT expire on its own
-aws dynamodb put-item --table-name ConnectChaosConfig --region $PRIMARY_REGION \
+aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
 ```
 
