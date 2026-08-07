@@ -45,25 +45,72 @@ Parameters:
     AllowedValues: ['regional', 'unified']
     Default: regional
 
+  CreateVpc:
+    Type: String
+    Description: >-
+      'true' (default): the stack creates a small self-contained VPC - two private subnets
+      in different AZs, a route table, a security group, and FREE gateway endpoints for
+      DynamoDB and S3. No NAT gateway or internet gateway is needed, because the only
+      VPC-attached functions (LexFulfillmentHandler, ConnectChaos-CallLogger) talk solely
+      to DynamoDB and to S3 (the FIS Lambda extension reads its fault config from S3).
+      Set to 'false' to attach the Lambdas to your own VPC instead, in which case you must
+      supply LambdaSubnetIdA, LambdaSubnetIdB and LambdaSecurityGroupId, and those subnets
+      MUST be able to reach DynamoDB and S3 (gateway endpoints or a NAT gateway).
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+
+  VpcCidr:
+    Type: String
+    Description: (CreateVpc=true) CIDR for the created VPC.
+    Default: 10.20.0.0/16
+
+  SubnetACidr:
+    Type: String
+    Description: (CreateVpc=true) CIDR for private subnet A.
+    Default: 10.20.1.0/24
+
+  SubnetBCidr:
+    Type: String
+    Description: (CreateVpc=true) CIDR for private subnet B.
+    Default: 10.20.2.0/24
+
   LambdaSubnetIdA:
-    Type: AWS::EC2::Subnet::Id
-    Description: First VPC subnet for Lambda (also targeted by FIS Experiment 2 DDB disruption)
+    Type: String
+    Description: >-
+      (CreateVpc=false only) First existing VPC subnet for the Lambdas, also targeted by
+      FIS Experiment 2. Leave empty when CreateVpc=true.
+    Default: ''
 
   LambdaSubnetIdB:
-    Type: AWS::EC2::Subnet::Id
-    Description: Second VPC subnet for Lambda (also targeted by FIS Experiment 2 DDB disruption)
+    Type: String
+    Description: >-
+      (CreateVpc=false only) Second existing VPC subnet for the Lambdas, also targeted by
+      FIS Experiment 2. Leave empty when CreateVpc=true.
+    Default: ''
 
   LambdaSecurityGroupId:
-    Type: AWS::EC2::SecurityGroup::Id
-    Description: Security Group for Lambda VPC config
+    Type: String
+    Description: >-
+      (CreateVpc=false only) Existing security group for the Lambda VPC config.
+      Leave empty when CreateVpc=true.
+    Default: ''
 
   LambdaCodeBucket:
     Type: String
     Description: Pre-existing S3 bucket with Lambda .zip packages
 
   FISExtensionLayerArn:
-    Type: String
-    Description: AWS FIS Lambda extension layer ARN for this region
+    # Resolved automatically from the AWS-published public SSM parameter, so the operator
+    # never has to look this up. Both the publishing account AND the layer version differ
+    # per region (us-east-1 -> ...211125607513...:374, us-west-2 -> ...975050054544...:370),
+    # which makes a hand-copied value a common and silent source of error.
+    # Ref: https://docs.aws.amazon.com/fis/latest/userguide/actions-lambda-extension-arns.html
+    # Override only if you need to pin a specific extension version.
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: >-
+      AWS FIS Lambda extension layer ARN. Leave at the default to resolve the current
+      x86_64 extension for this region automatically.
+    Default: /aws/service/fis/lambda-extension/AWS-FIS-extension-x86_64/1.x.x
 
   ContactFlowErrorsThreshold:
     Type: Number
@@ -144,6 +191,21 @@ Parameters:
 #   • eu-west-2 ↔ eu-central-1
 #   • ap-northeast-1 ↔ ap-northeast-3   (one-directional: replica must be ap-northeast-3)
 Rules:
+  # When you opt out of the built-in VPC you must supply your own networking.
+  BringYourOwnVpcNeedsIds:
+    RuleCondition: !Equals [!Ref CreateVpc, 'false']
+    Assertions:
+      - Assert: !And
+          - !Not [!Equals [!Ref LambdaSubnetIdA, '']]
+          - !Not [!Equals [!Ref LambdaSubnetIdB, '']]
+          - !Not [!Equals [!Ref LambdaSecurityGroupId, '']]
+        AssertDescription: >-
+          CreateVpc=false requires LambdaSubnetIdA, LambdaSubnetIdB and
+          LambdaSecurityGroupId. Those subnets must be able to reach DynamoDB and S3
+          (gateway endpoints or a NAT gateway), otherwise the fulfillment and call-logger
+          Lambdas cannot work even when healthy and the FIS Lambda extension cannot read
+          its fault config from S3.
+
   ValidACGRPair:
     Assertions:
       - Assert: !Or
@@ -203,6 +265,7 @@ Conditions:
     - !Condition IsPrimaryRegion
   DeployTrafficGenerator: !Equals [!Ref EnableTrafficGenerator, 'true']
   UseLexGR: !Equals [!Ref EnableLexGlobalResiliency, 'true']
+  MakeVpc: !Equals [!Ref CreateVpc, 'true']
 
   # Source-side Lex GR replication is declared on the bot in the primary region only.
   UseLexGRPrimary: !And
@@ -350,6 +413,113 @@ Resources:
         LongestQueueWaitTime - the Exp 4 alarm metric.
       Content: !Sub |
         {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Welcome. Let me look up your information."},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"error-path","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"Text":"How can I help you today? You can ask to look up your account or check an order.","LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}"}},"Transitions":{"NextAction":"success-path","Conditions":[{"NextAction":"success-path","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"success-path","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"error-path","ErrorType":"NoMatchingError"},{"NextAction":"error-path","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"success-path","Type":"MessageParticipant","Parameters":{"Text":"Found your info. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"error-path","Type":"MessageParticipant","Parameters":{"Text":"We are experiencing technical difficulties. Please hold for the next available agent."},"Transitions":{"NextAction":"set-overflow-queue","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"set-overflow-queue","Type":"UpdateContactTargetQueue","Parameters":{"QueueId":"${ChaosOverflowQueue.QueueArn}"},"Transitions":{"NextAction":"transfer-overflow","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"transfer-overflow","Type":"TransferContactToQueue","Parameters":{},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"QueueAtCapacity"},{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+
+  # ═══════════════════════════════════════════════════════════
+  # OPTIONAL SELF-CONTAINED VPC  (Condition: MakeVpc)
+  # ═══════════════════════════════════════════════════════════
+  # Deliberately has NO internet gateway and NO NAT gateway. The only VPC-attached
+  # functions are LexFulfillmentHandler and ConnectChaos-CallLogger, and they need
+  # exactly two destinations:
+  #   * DynamoDB - their data store (and the target of Experiment 2's disruption)
+  #   * S3       - the FIS Lambda extension polls S3 for fault config
+  #                (AWS_FIS_CONFIGURATION_LOCATION). Without S3 reachability,
+  #                Experiments 1 and 3 silently never apply their fault.
+  # Both are reachable via GATEWAY endpoints, which are free:
+  # "There is no additional charge for using gateway endpoints" - AWS VPC PrivateLink docs.
+  ChaosVpc:
+    Type: AWS::EC2::VPC
+    Condition: MakeVpc
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'connect-chaos-vpc-${AWS::Region}'
+
+  ChaosSubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: MakeVpc
+    Properties:
+      VpcId: !Ref ChaosVpc
+      CidrBlock: !Ref SubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'connect-chaos-private-a-${AWS::Region}'
+
+  ChaosSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: MakeVpc
+    Properties:
+      VpcId: !Ref ChaosVpc
+      CidrBlock: !Ref SubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'connect-chaos-private-b-${AWS::Region}'
+
+  # One route table shared by both subnets. It contains only the local VPC route plus
+  # the two gateway-endpoint prefix-list routes that CloudFormation adds automatically.
+  # FIS Experiment 2 clones the NACL, not this route table, so it is unaffected.
+  ChaosRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: MakeVpc
+    Properties:
+      VpcId: !Ref ChaosVpc
+      Tags:
+        - Key: Name
+          Value: !Sub 'connect-chaos-private-${AWS::Region}'
+
+  ChaosSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: MakeVpc
+    Properties:
+      SubnetId: !Ref ChaosSubnetA
+      RouteTableId: !Ref ChaosRouteTable
+
+  ChaosSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: MakeVpc
+    Properties:
+      SubnetId: !Ref ChaosSubnetB
+      RouteTableId: !Ref ChaosRouteTable
+
+  # Free gateway endpoint - DynamoDB. Also the surface Experiment 2 severs at the NACL.
+  ChaosDynamoDbEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: MakeVpc
+    Properties:
+      VpcId: !Ref ChaosVpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref ChaosRouteTable
+
+  # Free gateway endpoint - S3. Required by the FIS Lambda extension.
+  ChaosS3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: MakeVpc
+    Properties:
+      VpcId: !Ref ChaosVpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref ChaosRouteTable
+
+  # Egress-only security group. Lambda needs no inbound rules; CloudFormation applies a
+  # default allow-all egress rule, which the gateway endpoints then scope to DDB and S3.
+  ChaosLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: MakeVpc
+    Properties:
+      GroupDescription: Egress-only SG for the Connect chaos Lambdas (DynamoDB + S3 via gateway endpoints)
+      VpcId: !Ref ChaosVpc
+      Tags:
+        - Key: Name
+          Value: !Sub 'connect-chaos-lambda-${AWS::Region}'
 
   # ── Exp 4: no-agent overflow queue ──
   # Hours of operation (24x7) is required by AWS::Connect::Queue. This queue is referenced
@@ -734,10 +904,10 @@ Resources:
           AWS_LAMBDA_EXEC_WRAPPER: /opt/aws-fis/bootstrap
       VpcConfig:
         SubnetIds:
-          - !Ref LambdaSubnetIdA
-          - !Ref LambdaSubnetIdB
+          - !If [MakeVpc, !Ref ChaosSubnetA, !Ref LambdaSubnetIdA]
+          - !If [MakeVpc, !Ref ChaosSubnetB, !Ref LambdaSubnetIdB]
         SecurityGroupIds:
-          - !Ref LambdaSecurityGroupId
+          - !If [MakeVpc, !Ref ChaosLambdaSecurityGroup, !Ref LambdaSecurityGroupId]
       Tags:
         - Key: FISExperiment
           Value: ConnectChaos
@@ -786,10 +956,10 @@ Resources:
           CALL_LOG_TABLE_NAME: ConnectChaosCallLog
       VpcConfig:
         SubnetIds:
-          - !Ref LambdaSubnetIdA
-          - !Ref LambdaSubnetIdB
+          - !If [MakeVpc, !Ref ChaosSubnetA, !Ref LambdaSubnetIdA]
+          - !If [MakeVpc, !Ref ChaosSubnetB, !Ref LambdaSubnetIdB]
         SecurityGroupIds:
-          - !Ref LambdaSecurityGroupId
+          - !If [MakeVpc, !Ref ChaosLambdaSecurityGroup, !Ref LambdaSecurityGroupId]
       Tags:
         - Key: FISExperiment
           Value: ConnectChaos
@@ -1030,12 +1200,15 @@ Resources:
           ResourceType: aws:ec2:subnet
           # Target every subnet the Lambda has an ENI in. If FIS only disrupts a subset,
           # invocations landing on the other ENI bypass the chaos non-deterministically.
-          ResourceArns: !Split
-            - ','
-            - !Join
-              - ','
-              - - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${LambdaSubnetIdA}'
-                - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${LambdaSubnetIdB}'
+          # Must match the subnets the Lambdas actually have ENIs in, whether those were
+          # created by this stack (MakeVpc) or supplied by the operator.
+          ResourceArns:
+            - !Sub
+              - 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${SubnetA}'
+              - SubnetA: !If [MakeVpc, !Ref ChaosSubnetA, !Ref LambdaSubnetIdA]
+            - !Sub
+              - 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${SubnetB}'
+              - SubnetB: !If [MakeVpc, !Ref ChaosSubnetB, !Ref LambdaSubnetIdB]
           SelectionMode: ALL
       Actions:
         DisruptDDB:
@@ -1209,6 +1382,18 @@ Resources:
 # OUTPUTS
 # ═══════════════════════════════════════════════════════════════
 Outputs:
+  VpcId:
+    Condition: MakeVpc
+    Value: !Ref ChaosVpc
+    Description: VPC created by this stack for the chaos Lambdas
+  VpcSubnetA:
+    Condition: MakeVpc
+    Value: !Ref ChaosSubnetA
+    Description: Private subnet A (also an FIS Experiment 2 target)
+  VpcSubnetB:
+    Condition: MakeVpc
+    Value: !Ref ChaosSubnetB
+    Description: Private subnet B (also an FIS Experiment 2 target)
   LexBotId:
     Condition: CreateLexLocally
     Value: !GetAtt ConnectChaosBot.Id
