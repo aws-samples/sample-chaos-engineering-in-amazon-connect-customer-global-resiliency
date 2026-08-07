@@ -77,18 +77,47 @@ deploy: bootstrap
 # Deploy BOTH regions in the correct order, handing the Lex GR bot/alias IDs from the
 # primary stack to the paired stack. Leaving both stacks standing is what proves the
 # paired region can actually SERVE a call after failover.
+#
+# This runs as a SINGLE shell script on purpose. Make expands $$(shell ...) and $$(eval ...)
+# at parse time, which would read the Lex ids before the primary stack exists and pass empty
+# values to the paired region - producing alarms with empty dimensions. Using shell variables
+# keeps the lookup at execution time.
 deploy-pair:
-	@if [ -z "$(STACK)" ] || [ -z "$(PRIMARY_REGION)" ] || [ -z "$(PAIRED_REGION)" ] 	   || [ -z "$(PRIMARY_INSTANCE_ARN)" ] || [ -z "$(PAIRED_INSTANCE_ARN)" ] 	   || [ -z "$(TDG_ID)" ]; then 	  echo "Required: STACK PRIMARY_REGION PAIRED_REGION PRIMARY_INSTANCE_ARN"; 	  echo "          PAIRED_INSTANCE_ARN TDG_ID"; exit 2; 	fi
-	@echo "=== 1/2 primary region $(PRIMARY_REGION) ==="
-	$(MAKE) deploy STACK=$(STACK) REGION=$(PRIMARY_REGION) 	  CONNECT_INSTANCE_ARN=$(PRIMARY_INSTANCE_ARN) 	  CONNECT_INSTANCE_ID=$(shell echo $(PRIMARY_INSTANCE_ARN) | awk -F/ '{print $$NF}') 	  PRIMARY_REGION=$(PRIMARY_REGION) PAIRED_REGION=$(PAIRED_REGION) TDG_ID=$(TDG_ID)
-	@echo "=== reading Lex GR ids from the primary stack ==="
-	$(eval LEX_BOT_ID := $(shell aws cloudformation describe-stacks --stack-name $(STACK) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue" --output text))
-	$(eval LEX_ALIAS_ID := $(shell aws cloudformation describe-stacks --stack-name $(STACK) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='LexBotAliasId'].OutputValue" --output text))
-	@echo "    bot=$(LEX_BOT_ID) alias=$(LEX_ALIAS_ID)"
-	@if [ -z "$(LEX_BOT_ID)" ] || [ "$(LEX_BOT_ID)" = "None" ]; then 	  echo "ERROR: could not read LexBotId from the primary stack"; exit 1; fi
-	@echo "=== 2/2 paired region $(PAIRED_REGION) ==="
-	$(MAKE) deploy STACK=$(STACK) REGION=$(PAIRED_REGION) 	  CONNECT_INSTANCE_ARN=$(PAIRED_INSTANCE_ARN) 	  CONNECT_INSTANCE_ID=$(shell echo $(PAIRED_INSTANCE_ARN) | awk -F/ '{print $$NF}') 	  PRIMARY_REGION=$(PRIMARY_REGION) PAIRED_REGION=$(PAIRED_REGION) TDG_ID=$(TDG_ID) 	  REPLICATED_LEX_BOT_ID=$(LEX_BOT_ID) REPLICATED_LEX_BOT_ALIAS_ID=$(LEX_ALIAS_ID)
-	@echo "=== both regions deployed ==="
+	@set -e; \
+	if [ -z "$(STACK)" ] || [ -z "$(PRIMARY_REGION)" ] || [ -z "$(PAIRED_REGION)" ] \
+	   || [ -z "$(PRIMARY_INSTANCE_ARN)" ] || [ -z "$(PAIRED_INSTANCE_ARN)" ] \
+	   || [ -z "$(TDG_ID)" ]; then \
+	  echo "Required: STACK PRIMARY_REGION PAIRED_REGION PRIMARY_INSTANCE_ARN"; \
+	  echo "          PAIRED_INSTANCE_ARN TDG_ID"; exit 2; \
+	fi; \
+	PRIMARY_ID=$$(echo "$(PRIMARY_INSTANCE_ARN)" | awk -F/ '{print $$NF}'); \
+	PAIRED_ID=$$(echo "$(PAIRED_INSTANCE_ARN)"  | awk -F/ '{print $$NF}'); \
+	echo "=== 1/2 primary region $(PRIMARY_REGION) (instance $$PRIMARY_ID) ==="; \
+	$(MAKE) deploy STACK=$(STACK) REGION=$(PRIMARY_REGION) \
+	  CONNECT_INSTANCE_ARN=$(PRIMARY_INSTANCE_ARN) CONNECT_INSTANCE_ID=$$PRIMARY_ID \
+	  PRIMARY_REGION=$(PRIMARY_REGION) PAIRED_REGION=$(PAIRED_REGION) TDG_ID=$(TDG_ID); \
+	echo "=== reading Lex GR ids from the primary stack ==="; \
+	BOT=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $(PRIMARY_REGION) \
+	        --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue" --output text); \
+	ALIAS=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $(PRIMARY_REGION) \
+	        --query "Stacks[0].Outputs[?OutputKey=='LexBotAliasId'].OutputValue" --output text); \
+	echo "    bot=$$BOT alias=$$ALIAS"; \
+	if [ -z "$$BOT" ] || [ "$$BOT" = "None" ] || [ -z "$$ALIAS" ] || [ "$$ALIAS" = "None" ]; then \
+	  echo "ERROR: could not read LexBotId/LexBotAliasId from the primary stack."; \
+	  echo "       The paired region needs them when EnableLexGlobalResiliency=true."; \
+	  exit 1; \
+	fi; \
+	echo "=== 2/2 paired region $(PAIRED_REGION) (instance $$PAIRED_ID) ==="; \
+	$(MAKE) deploy STACK=$(STACK) REGION=$(PAIRED_REGION) \
+	  CONNECT_INSTANCE_ARN=$(PAIRED_INSTANCE_ARN) CONNECT_INSTANCE_ID=$$PAIRED_ID \
+	  PRIMARY_REGION=$(PRIMARY_REGION) PAIRED_REGION=$(PAIRED_REGION) TDG_ID=$(TDG_ID) \
+	  REPLICATED_LEX_BOT_ID=$$BOT REPLICATED_LEX_BOT_ALIAS_ID=$$ALIAS; \
+	echo "=== both regions deployed ==="; \
+	for R in $(PRIMARY_REGION) $(PAIRED_REGION); do \
+	  printf "%-12s " $$R; \
+	  aws cloudformation describe-stacks --stack-name $(STACK) --region $$R \
+	    --query "Stacks[0].StackStatus" --output text; \
+	done
 
 lint:
 	# W1030 is expected: ReplicatedLexBot* params are intentionally empty in
