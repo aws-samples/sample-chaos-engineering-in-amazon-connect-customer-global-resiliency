@@ -125,13 +125,19 @@ def generate_lex_codehook_latency(function_name, count):
         )
 
 
-def generate_missed_calls(instance_id, count):
-    """Simulate Experiment 4: MissedCalls from flow logic failure."""
+def generate_queue_wait(instance_id, queue_name, wait_seconds, count):
+    """Simulate Experiment 4: contacts backing up in the no-agent overflow queue.
+
+    Emits LongestQueueWaitTime (Seconds) with the verified dimension set
+    InstanceId + MetricGroup=Queue + QueueName, matching the Exp 4 alarm exactly.
+    """
     for _ in range(count):
         put_metric(
             "AWS/Connect",
-            "MissedCalls",
-            {"InstanceId": instance_id, "MetricGroup": "VoiceCalls"},
+            "LongestQueueWaitTime",
+            {"InstanceId": instance_id, "MetricGroup": "Queue", "QueueName": queue_name},
+            value=float(wait_seconds),
+            unit="Seconds",
         )
 
 
@@ -154,6 +160,9 @@ def handler(event, context):
     bot_id = os.environ.get("LEX_BOT_ID", "placeholder-bot-id")
     bot_alias_id = os.environ.get("LEX_BOT_ALIAS_ID", "placeholder-alias-id")
     function_name = os.environ.get("LAMBDA_FUNCTION_NAME", "ConnectChaos-LexFulfillmentHandler")
+
+    queue_name = os.environ.get("QUEUE_NAME", "ConnectChaos-Overflow")
+    queue_wait_seconds = int(os.environ.get("QUEUE_WAIT_SECONDS", "120"))
 
     mode = event.get("mode", os.environ.get("MODE", "healthy"))
     fault_type = event.get("fault_type", os.environ.get("FAULT_TYPE", "all"))
@@ -179,8 +188,8 @@ def handler(event, context):
             results["metrics_emitted"].append("Lambda/Duration (Lex code hook)")
 
         if fault_type in ("flow", "all"):
-            generate_missed_calls(instance_id, count)
-            results["metrics_emitted"].append("Connect/MissedCalls")
+            generate_queue_wait(instance_id, queue_name, queue_wait_seconds, count)
+            results["metrics_emitted"].append("Connect/LongestQueueWaitTime")
 
     else:
         return {"statusCode": 400, "body": f"Unknown mode: {mode}. Use 'healthy' or 'faulty'."}

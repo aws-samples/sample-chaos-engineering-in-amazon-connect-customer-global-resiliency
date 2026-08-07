@@ -29,6 +29,21 @@ Parameters:
     Description: Paired ACGR region
     Default: us-west-2
     AllowedValues: [us-east-1, us-west-2, ap-northeast-1, ap-northeast-3, eu-central-1, eu-west-2]
+
+  WitnessRegion:
+    Type: String
+    Description: >-
+      Third Region used as the DynamoDB MRSC *witness* for the ConnectChaosCustomers global
+      table (Experiment 2). A MRSC global table must span exactly three Regions — here two
+      replicas (primary + paired) plus one witness. The witness holds no readable data and
+      is fully managed by DynamoDB; it does not appear in your account. It MUST be in the
+      same MRSC Region set as the replica pair:
+        • US set  (us-east-1, us-east-2, us-west-2)                  -> witness us-east-2
+        • EU set  (eu-west-1, eu-west-2, eu-west-3, eu-central-1)    -> witness eu-west-1 or eu-west-3
+        • AP set  (ap-northeast-1, ap-northeast-2, ap-northeast-3)   -> witness ap-northeast-2
+      Ref: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html
+    Default: us-east-2
+    AllowedValues: [us-east-2, eu-west-1, eu-west-3, ap-northeast-2]
   TrafficDistributionGroupId:
     Type: String
     Description: Traffic Distribution Group ID for ACGR failover
@@ -69,25 +84,22 @@ Parameters:
     Type: Number
     Default: 5
 
-  LexCodeHookLatencyThresholdMs:
+  DDBFaultErrorsThreshold:
     Type: Number
-    Default: 7000
+    Default: 3
     Description: >-
-      Exp 3 alarm threshold in milliseconds for LexFulfillmentHandler Duration (Maximum).
-      Normal fulfillment is <1s; FIS invocation-add-delay drives it to ~31s. Default 7000
-      trips on the injected delay but not on normal traffic. (Replaces the former
-      RuntimeLambdaErrorsThreshold: AWS/Lex RuntimeLambdaErrors is not emitted for the
-      Amazon Connect voice StartConversation path — see FIXES.md Fix 7.)
+      Exp 2 alarm threshold — FIS-induced DynamoDB errors per minute on the MRSC global table.
+
+  RuntimeLambdaErrorsThreshold:
+    Type: Number
+    Default: 3
 
   QueueWaitSecondsThreshold:
     Type: Number
     Default: 60
     Description: >-
-      (Exp 4) Alarm threshold in SECONDS for AWS/Connect LongestQueueWaitTime on the
-      no-agent overflow queue. Replaces the former MissedCallsThreshold: MissedCalls
-      requires a call to be OFFERED to an agent and go unanswered for 20s, which is not
-      reproducible without a staffed agent deliberately not answering. A queue with no
-      routing profile makes the wait-time signal deterministic.
+      Exp 4 alarm threshold (seconds). Fires when a contact waits longer than this in the
+      no-agent overflow queue (LongestQueueWaitTime).
 
   FISExperimentDuration:
     Type: String
@@ -166,6 +178,38 @@ Rules:
           PrimaryRegion + PairedRegion must form an ACGR-supported pair:
           us-east-1/us-west-2, eu-west-2/eu-central-1, or ap-northeast-1/ap-northeast-3.
 
+  # A DynamoDB MRSC global table must span exactly three Regions within ONE MRSC Region set.
+  # The replica pair is PrimaryRegion + PairedRegion, so the witness must be the remaining
+  # in-set Region. Enforced here so a mismatched witness fails at validation rather than
+  # part-way through global table creation.
+  ValidMRSCWitness:
+    Assertions:
+      - Assert: !Or
+          # US set: replicas IAD + PDX -> witness must be CMH (us-east-2)
+          - !And
+            - !Or
+              - !Equals [!Ref PrimaryRegion, us-east-1]
+              - !Equals [!Ref PrimaryRegion, us-west-2]
+            - !Equals [!Ref WitnessRegion, us-east-2]
+          # EU set: replicas LHR + FRA -> witness must be DUB (eu-west-1) or CDG (eu-west-3)
+          - !And
+            - !Or
+              - !Equals [!Ref PrimaryRegion, eu-west-2]
+              - !Equals [!Ref PrimaryRegion, eu-central-1]
+            - !Or
+              - !Equals [!Ref WitnessRegion, eu-west-1]
+              - !Equals [!Ref WitnessRegion, eu-west-3]
+          # AP set: replicas NRT + KIX -> witness must be ICN (ap-northeast-2)
+          - !And
+            - !Or
+              - !Equals [!Ref PrimaryRegion, ap-northeast-1]
+              - !Equals [!Ref PrimaryRegion, ap-northeast-3]
+            - !Equals [!Ref WitnessRegion, ap-northeast-2]
+        AssertDescription: >-
+          WitnessRegion must be in the same DynamoDB MRSC Region set as PrimaryRegion/PairedRegion:
+          us-east-1|us-west-2 -> us-east-2; eu-west-2|eu-central-1 -> eu-west-1 or eu-west-3;
+          ap-northeast-1|ap-northeast-3 -> ap-northeast-2.
+
   # Lex Global Resiliency currently supports IAD/PDX and LDN/FRA only.
   # Tokyo/Osaka customers must run with EnableLexGlobalResiliency=false (per-region Lex deploy)
   # and use the post-deploy script to wire the paired-region contact flow.
@@ -224,12 +268,30 @@ Resources:
   # PRIMARY REGION ONLY
   # ═══════════════════════════════════════════════════════════
 
+  # ── Exp 2 target: MRSC (multi-Region STRONG consistency) global table ──
+  # Why MRSC: the FIS action aws:dynamodb:global-table-pause-replication simulates Region
+  # isolation. On an MREC (eventually consistent) table that only stalls replication and is
+  # invisible to the application. On an MRSC table, writes and STRONGLY CONSISTENT reads in
+  # the isolated Region fail with FIS-injected HTTP 500s, which DynamoDB publishes as
+  # FaultInjectionServiceInducedErrors (a labelled subset of SystemErrors). That gives
+  # Experiment 2 a real, application-visible DynamoDB failure and an AWS/DynamoDB metric
+  # that unambiguously attributes the fault to DynamoDB.
+  #
+  # MRSC requires EXACTLY three Regions in one Region set: two replicas + one witness.
+  # A witness stores data for quorum but is not readable/writable and is managed by
+  # DynamoDB (it does not appear in your account).
+  #
+  # NOTE: MRSC tables must be created empty and replicas cannot be added later — this is a
+  # create-time topology choice, not an in-place conversion.
+  # Streams are not required for MRSC, so StreamSpecification is intentionally omitted.
+  # Ref: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html
   CustomerTable:
     Type: AWS::DynamoDB::GlobalTable
     Condition: IsPrimaryRegion
     Properties:
       TableName: ConnectChaosCustomers
       BillingMode: PAY_PER_REQUEST
+      MultiRegionConsistency: STRONG
       AttributeDefinitions:
         - AttributeName: account_id
           AttributeType: S
@@ -241,43 +303,18 @@ Resources:
           Tags:
             - Key: FISExperiment
               Value: ConnectChaos
+            # Tag recognised by the AWS-managed FIS "Cross-Region: Connectivity" scenario,
+            # which also pauses DynamoDB replication. Harmless for our own template.
+            - Key: DisruptDynamoDb
+              Value: Allowed
         - Region: !Ref PairedRegion
           Tags:
             - Key: FISExperiment
               Value: ConnectChaos
-      StreamSpecification:
-        StreamViewType: NEW_AND_OLD_IMAGES
-
-  # Inbound-call log. A DynamoDB Global Table so call records written in the primary
-  # region replicate to the paired region — after ACGR fails telephony over, the
-  # receiving region has (and keeps appending to) the same log. The CallLogger Lambda
-  # writes one item per inbound contact from the very first block of the flow.
-  CallLogTable:
-    Type: AWS::DynamoDB::GlobalTable
-    Condition: IsPrimaryRegion
-    Properties:
-      TableName: ConnectChaosCallLog
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: contact_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: contact_id
-          KeyType: HASH
-      TimeToLiveSpecification:
-        AttributeName: expires_at
-        Enabled: true
-      Replicas:
-        - Region: !Ref PrimaryRegion
-          Tags:
-            - Key: FISExperiment
-              Value: ConnectChaos
-        - Region: !Ref PairedRegion
-          Tags:
-            - Key: FISExperiment
-              Value: ConnectChaos
-      StreamSpecification:
-        StreamViewType: NEW_AND_OLD_IMAGES
+            - Key: DisruptDynamoDb
+              Value: Allowed
+      GlobalTableWitnesses:
+        - Region: !Ref WitnessRegion
 
   ChaosConfigTable:
     Type: AWS::DynamoDB::GlobalTable
@@ -303,60 +340,60 @@ Resources:
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
 
-  # FIX: A Lex V2 bot must be associated with the Connect instance (IntegrationAssociation)
-  # before the contact flows can invoke it at call time. Without this, the flows deploy but
-  # Lex is never reachable from Connect at runtime. Primary region only (that is where the
-  # flows are created and the bot is created locally; ACGR/Lex GR handle the paired region).
-  LexBotAssociation:
-    Type: AWS::Connect::IntegrationAssociation
-    Condition: IsPrimaryRegion
-    Properties:
-      InstanceId: !Ref ConnectInstanceArn
-      IntegrationType: LEX_BOT
-      IntegrationArn: !GetAtt ConnectChaosBotAlias.Arn
-
   MainIVRFlow:
     Type: AWS::Connect::ContactFlow
     Condition: IsPrimaryRegion
-    DependsOn:
-      - LexBotAssociation
-      - CallLoggerAssociation
+    # The bot must be associated with the instance before a flow may reference it.
+    DependsOn: LexBotIntegrationAssociation
     Properties:
       InstanceArn: !Ref ConnectInstanceArn
       Name: ConnectChaos-MainIVR
       Type: CONTACT_FLOW
       Description: Main IVR with Lex bot — ACGR auto-replicates to paired region
-      # Flow path: entry → log-call (direct Lambda invoke) → lex-input → success/error.
-      # The log-call "Invoke AWS Lambda function" block persists the inbound contact to
-      # DynamoDB (real audit/interaction-history write) and is what makes Experiment 2
-      # produce AWS/Connect ContactFlowErrors: when FIS severs DynamoDB connectivity,
-      # CallLoggerHandler's put_item raises, Connect takes this block's Error branch
-      # (→ error-msg), and ContactFlowErrors increments. Under normal conditions the
-      # write succeeds in a few ms and the call proceeds to the Lex block unchanged.
-      Content: !Sub |
-        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Welcome to customer service. I can help you look up your account or check an order."},"Transitions":{"NextAction":"log-call","Errors":[{"NextAction":"error-msg","ErrorType":"NoMatchingError"}]}},{"Identifier":"log-call","Type":"InvokeLambdaFunction","Parameters":{"LambdaFunctionARN":"${CallLoggerHandler.Arn}","InvocationTimeLimitSeconds":"8"},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"error-msg","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"Text":"How can I help you today? You can ask to look up your account or check an order.","LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}"}},"Transitions":{"NextAction":"success-msg","Conditions":[{"NextAction":"success-msg","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"success-msg","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"error-msg","ErrorType":"NoMatchingError"},{"NextAction":"error-msg","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"success-msg","Type":"MessageParticipant","Parameters":{"Text":"I found your information. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"error-msg","Type":"MessageParticipant","Parameters":{"Text":"We are experiencing difficulties. Please try again later."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+      # The Lex alias ARN uses the ACGR runtime token $.AwsRegion instead of a hardcoded
+      # Region. ACGR replicates this flow's content verbatim to the paired region, so a
+      # hardcoded Region would make the paired region call the PRIMARY region's Lex bot —
+      # defeating the failover. At flow runtime $.AwsRegion resolves to the Region the flow
+      # is executing in. Lex GR preserves the bot ID and alias ID across Regions, so the
+      # same ID pair is valid in both.
+      # ACGR requirement: "Update your flows to replace any hardcoded Regions with a
+      # $.AwsRegion parameter... supported only for Lambda ARN and Lex ARN."
+      # Ref: https://docs.aws.amazon.com/connect/latest/adminguide/connect-global-resiliency-requirements.html
+      # NOTE: when EnableLexGlobalResiliency=false the per-Region bot IDs differ, so
+      # $.AwsRegion alone is not sufficient — run scripts/wire-paired-flow.sh after deploy.
+      Content: !Sub
+        - |
+          {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Welcome to customer service. I can help you look up your account or check an order."},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"error-msg","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${BotId}/${BotAliasId}"}},"Transitions":{"NextAction":"success-msg","Conditions":[{"NextAction":"success-msg","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"success-msg","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"error-msg","ErrorType":"NoMatchingError"},{"NextAction":"error-msg","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"success-msg","Type":"MessageParticipant","Parameters":{"Text":"I found your information. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"error-msg","Type":"MessageParticipant","Parameters":{"Text":"We are experiencing difficulties. Please try again later."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+        - BotId: !GetAtt ConnectChaosBot.Id
+          BotAliasId: !GetAtt ConnectChaosBotAlias.BotAliasId
 
   ChaosTestFlow:
     Type: AWS::Connect::ContactFlow
     Condition: IsPrimaryRegion
-    DependsOn: LexBotAssociation
+    DependsOn: LexBotIntegrationAssociation
     Properties:
       InstanceArn: !Ref ConnectInstanceArn
       Name: ConnectChaos-ChaosTest
       Type: CONTACT_FLOW
       Description: >-
-        Chaos test flow (Exp 4). The failure path sets the no-agent overflow queue and
-        transfers the contact there, so unanswered contacts accumulate
-        LongestQueueWaitTime - the Exp 4 alarm metric.
-      Content: !Sub |
-        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Welcome. Let me look up your information."},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"error-path","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"Text":"How can I help you today? You can ask to look up your account or check an order.","LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}"}},"Transitions":{"NextAction":"success-path","Conditions":[{"NextAction":"success-path","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"success-path","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"error-path","ErrorType":"NoMatchingError"},{"NextAction":"error-path","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"success-path","Type":"MessageParticipant","Parameters":{"Text":"Found your info. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"error-path","Type":"MessageParticipant","Parameters":{"Text":"We are experiencing technical difficulties. Please hold for the next available agent."},"Transitions":{"NextAction":"set-overflow-queue","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"set-overflow-queue","Type":"UpdateContactTargetQueue","Parameters":{"QueueId":"${ChaosOverflowQueue.QueueArn}"},"Transitions":{"NextAction":"transfer-overflow","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"transfer-overflow","Type":"TransferContactToQueue","Parameters":{},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"QueueAtCapacity"},{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+        Chaos test flow (Exp 4). On the failure path it sets the no-agent overflow queue
+        and transfers the contact there, so unanswered contacts accumulate
+        LongestQueueWaitTime — the Exp 4 alarm metric.
+      # Lex alias ARN uses the ACGR $.AwsRegion runtime token — see MainIVRFlow above.
+      # The queue reference stays a Connect-internal ARN: ACGR replicates the queue and
+      # remaps flow queue references in the paired region, so no token is needed there.
+      Content: !Sub
+        - |
+          {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Welcome. Let me look up your information."},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"error-path","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${BotId}/${BotAliasId}"}},"Transitions":{"NextAction":"success-path","Conditions":[{"NextAction":"success-path","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"success-path","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"error-path","ErrorType":"NoMatchingError"},{"NextAction":"error-path","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"success-path","Type":"MessageParticipant","Parameters":{"Text":"Found your info. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"error-path","Type":"MessageParticipant","Parameters":{"Text":"We are experiencing technical difficulties. Please hold for the next available agent."},"Transitions":{"NextAction":"set-overflow-queue","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"set-overflow-queue","Type":"UpdateContactTargetQueue","Parameters":{"QueueId":"${ChaosOverflowQueue.QueueArn}"},"Transitions":{"NextAction":"transfer-overflow","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"transfer-overflow","Type":"TransferContactToQueue","Parameters":{},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"QueueAtCapacity"},{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+        - BotId: !GetAtt ConnectChaosBot.Id
+          BotAliasId: !GetAtt ConnectChaosBotAlias.BotAliasId
 
-  # ── Exp 4: no-agent overflow queue ──
-  # Hours of operation (24x7) is required by AWS::Connect::Queue. This queue is referenced
-  # by NO routing profile, so no agent can ever receive its contacts - a contact
-  # transferred here waits indefinitely, driving LongestQueueWaitTime up deterministically.
-  # ACGR replicates both resources to the paired region and remaps flow queue references,
-  # so no $.AwsRegion handling is needed for these Connect-internal ARNs.
+  # ── Exp 4: No-agent overflow queue ──
+  # Hours of operation (24x7) is required by AWS::Connect::Queue. The queue has NO
+  # routing profile pointing at it, so no agent can ever receive its contacts — a
+  # contact transferred here waits indefinitely, driving LongestQueueWaitTime up.
+  # ACGR replicates both resources (and remaps the flow's queue reference) to the
+  # paired region, so no $.AwsRegion handling is needed for Connect-internal ARNs.
   ChaosHoursOfOperation:
     Type: AWS::Connect::HoursOfOperation
     Condition: IsPrimaryRegion
@@ -404,15 +441,10 @@ Resources:
   # ── S3 ──
   # Bucket name includes the StackName so re-deploys after delete don't conflict
   # with the S3 90-day name reservation window.
-  # FIX: short 'ccfis-' prefix. S3 bucket names cap at 63 chars; the old
-  # 'connect-chaos-fis-' prefix + account(12) + region + stackname overflowed 63
-  # in longer-named regions (e.g. eu-central-1 = 64 chars, ap-northeast-3), which
-  # failed the paired-region deploy with "Bucket name should be between 3 and 63
-  # characters long".
   FISConfigBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub 'ccfis-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}'
+      BucketName: !Sub 'connect-chaos-fis-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}'
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -482,33 +514,6 @@ Resources:
                 Action: s3:GetObject
                 Resource: !Sub '${FISConfigBucket.Arn}/FisConfigs/*'
 
-  # Least-privilege role for the call-logger Lambda: VPC networking + write-only
-  # access to the call-log table. It intentionally cannot read the customer/config
-  # tables — it only appends call records.
-  CallLoggerRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub 'ConnectChaos-CallLogger-${AWS::Region}'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
-      Policies:
-        - PolicyName: DynamoDBWrite
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: [dynamodb:PutItem]
-                Resource:
-                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ConnectChaosCallLog'
-
   FISExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -561,6 +566,22 @@ Resources:
               - Effect: Allow
                 Action: cloudwatch:DescribeAlarms
                 Resource: '*'
+        # Permissions required by aws:dynamodb:global-table-pause-replication.
+        # FIS attaches a temporary resource policy to the target table for the duration of
+        # the experiment and removes it afterwards. dynamodb:InjectError is required because
+        # we target an MRSC global table.
+        - PolicyName: DynamoDBPauseReplication
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutResourcePolicy
+                  - dynamodb:DeleteResourcePolicy
+                  - dynamodb:GetResourcePolicy
+                  - dynamodb:DescribeTable
+                  - dynamodb:InjectError
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ConnectChaosCustomers'
 
   TrafficShiftRole:
     Type: AWS::IAM::Role
@@ -642,12 +663,6 @@ Resources:
                             PlainTextMessage:
                               Value: What is your account number?
                       MaxRetries: 2
-              # FIX: Lex V2 requires SlotPriorities for every slot; without it the
-              # locale build fails ("Slot ids [...] don't define a slot priority"),
-              # leaving the bot alias unbuilt and unusable at runtime.
-              SlotPriorities:
-                - Priority: 1
-                  SlotName: AccountNumber
               FulfillmentCodeHook:
                 Enabled: true
             - Name: CheckOrderStatus
@@ -667,9 +682,6 @@ Resources:
                             PlainTextMessage:
                               Value: What is your order ID?
                       MaxRetries: 2
-              SlotPriorities:
-                - Priority: 1
-                  SlotName: OrderId
               FulfillmentCodeHook:
                 Enabled: true
             - Name: FallbackIntent
@@ -707,19 +719,13 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: LexFulfillmentHandler
-      # Note: python3.12 reaches Lambda EoL in late 2027. Bump to the latest supported
-      # runtime (python3.13+) when you next update this sample. See:
+      # python3.13 (Amazon Linux 2023) — supported until Jun 30, 2029. Bump to the
+      # latest supported runtime when you next update this sample. See:
       # https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html
       Runtime: python3.13
       Handler: lex_fulfillment_handler.lambda_handler
       Role: !GetAtt LexFulfillmentRole.Arn
-      # Timeout is deliberately ABOVE Lex's 30s code-hook timeout for StartConversation
-      # (real Connect voice). Experiment 3 injects a ~31s startup delay; because the
-      # Lambda itself does not time out first, LEX hits its own 30s code-hook timeout and
-      # records AWS/Lex RuntimeLambdaErrors (the Exp 3 metric) instead of the failure only
-      # showing up as an AWS/Lambda timeout error. Normal invocations complete in <1s, so
-      # the larger ceiling has no effect outside the experiment. See FIXES.md (Fix 7).
-      Timeout: 40
+      Timeout: 8
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
@@ -742,6 +748,25 @@ Resources:
         - Key: FISExperiment
           Value: ConnectChaos
 
+  # ── Connect ↔ Lex association ──
+  # A Lex V2 bot must be associated with the Connect instance before a flow may invoke it.
+  # Deployed in BOTH regions and always built from THIS region's IDs, so each Connect
+  # instance is associated with its own local bot:
+  #   • Lex GR on  -> primary creates the bot; paired reuses the same (replicated) IDs
+  #   • Lex GR off -> each region created its own bot, so each association is local
+  # IntegrationArn format per the CFN reference:
+  #   arn:aws:lex:<region>:<account>:bot-alias/<bot-id>/<alias-id>
+  # Ref: https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-connect-integrationassociation.html
+  LexBotIntegrationAssociation:
+    Type: AWS::Connect::IntegrationAssociation
+    Properties:
+      InstanceId: !Ref ConnectInstanceArn
+      IntegrationType: LEX_BOT
+      IntegrationArn: !Sub
+        - 'arn:aws:lex:${AWS::Region}:${AWS::AccountId}:bot-alias/${BotId}/${BotAliasId}'
+        - BotId: !If [CreateLexLocally, !GetAtt ConnectChaosBot.Id, !Ref ReplicatedLexBotId]
+          BotAliasId: !If [CreateLexLocally, !GetAtt ConnectChaosBotAlias.BotAliasId, !Ref ReplicatedLexBotAliasId]
+
   # Lex V2 → Lambda invocation permission (FulfillmentCodeHook).
   # The Lambda is invoked by Lex (acting as the code hook), not by Connect directly.
   # Connect calls Lex; Lex calls Lambda; Lambda returns to Lex; Lex returns to Connect.
@@ -752,67 +777,6 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: lexv2.amazonaws.com
       SourceAccount: !Ref 'AWS::AccountId'
-
-  # ── Call-logger Lambda (real use case + Experiment 2 → ContactFlowErrors) ──
-  # Real use case: the contact flow invokes this function DIRECTLY (see MainIVRFlow
-  # log-call block) at the very start of every call to persist the inbound contact
-  # to DynamoDB — the audit/interaction-history write that a real contact center does
-  # before servicing the caller.
-  #
-  # It also gives FIS Experiment 2 its documented metric. A DDB failure reached
-  # through the Lex code hook surfaces as AWS/Lambda Errors + AWS/Lex
-  # RuntimeLambdaErrors and is *handled* by the Lex block's own error branch — it does
-  # NOT increment AWS/Connect ContactFlowErrors. A direct InvokeLambdaFunction block
-  # that errors DOES route the contact down the flow's Error branch, which is exactly
-  # what ContactFlowErrors counts. This function runs in the SAME VPC subnets FIS
-  # Exp 2 disrupts, so the network fault applies to its put_item. Deployed in BOTH
-  # regions (unlike the primary-only Lex bot, there is no Lex-GR equivalent for
-  # Lambda), and associated with each region's Connect instance so ACGR can remap the
-  # ARN in the replicated paired-region flow.
-  CallLoggerHandler:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: ConnectChaos-CallLogger
-      Runtime: python3.13
-      Handler: call_logger.lambda_handler
-      Role: !GetAtt CallLoggerRole.Arn
-      Timeout: 8
-      MemorySize: 128
-      Code:
-        S3Bucket: !Ref LambdaCodeBucket
-        S3Key: connect-chaos/call_logger.zip
-      Environment:
-        Variables:
-          CALL_LOG_TABLE_NAME: ConnectChaosCallLog
-      VpcConfig:
-        SubnetIds:
-          - !Ref LambdaSubnetIdA
-          - !Ref LambdaSubnetIdB
-        SecurityGroupIds:
-          - !Ref LambdaSecurityGroupId
-      Tags:
-        - Key: FISExperiment
-          Value: ConnectChaos
-
-  # Amazon Connect → Lambda invocation permission for the direct-invoke call logger.
-  CallLoggerPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref CallLoggerHandler
-      Action: lambda:InvokeFunction
-      Principal: connect.amazonaws.com
-      SourceAccount: !Ref 'AWS::AccountId'
-      SourceArn: !Ref ConnectInstanceArn
-
-  # Associate the call-logger Lambda with THIS region's Connect instance so the
-  # contact flow can invoke it. Created in both regions so ACGR can remap the ARN
-  # when it replicates the flow to the paired region.
-  CallLoggerAssociation:
-    Type: AWS::Connect::IntegrationAssociation
-    Properties:
-      InstanceId: !Ref ConnectInstanceArn
-      IntegrationType: LAMBDA_FUNCTION
-      IntegrationArn: !GetAtt CallLoggerHandler.Arn
 
   TrafficShiftHandler:
     Type: AWS::Lambda::Function
@@ -900,38 +864,133 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
-  # Exp 3: Lex code-hook latency/timeout.
-  #
-  # FIX 7: the original design alarmed on AWS/Lex RuntimeLambdaErrors, but that metric
-  # is NOT produced for real Amazon Connect voice traffic. Connect voice invokes the bot
-  # through the bidirectional streaming API (Operation=StartConversation); across repeated
-  # real calls, a slow/timed-out fulfillment code hook on that path emits NO
-  # RuntimeLambdaErrors under any dimension set (that metric only appears for the
-  # request/response RecognizeUtterance/RecognizeText operations used by the CLI and the
-  # synthetic generator). See FIXES.md (Fix 7) for the investigation.
-  #
-  # Reliable, real-voice signal instead: alarm on the fulfillment Lambda's DURATION.
-  # Experiment 3 injects a ~31s startup delay (> Lex's code-hook timeout, < the Lambda's
-  # 40s timeout), so LexFulfillmentHandler's Duration spikes to ~31s on every call while
-  # the function still returns cleanly (0 Lambda errors). That makes Exp 3 both reliable
-  # on real telephony AND cleanly distinct from Exp 1 (invocation-error → the function
-  # never runs, Duration ~0, Errors > 0).
+  AlarmDynamoDBFaultErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ConnectChaos-DDB-FISInducedErrors-${AWS::Region}'
+      AlarmDescription: >-
+        Exp 2: DynamoDB Region isolation. Counts FIS-injected HTTP 500s on the MRSC global
+        table in THIS region — a labelled subset of SystemErrors, so it distinguishes
+        experiment-induced failures from organic service errors.
+      Metrics:
+        # FaultInjectionServiceInducedErrors is published ONLY on the [TableName, Operation]
+        # dimension pair — an alarm on TableName alone never matches data and stays in
+        # INSUFFICIENT_DATA forever. We therefore enumerate the operations the sample
+        # performs and sum them with metric math.
+        # Ref: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/metrics-dimensions.html
+        - Id: getitem
+          MetricStat:
+            Metric:
+              Namespace: AWS/DynamoDB
+              MetricName: FaultInjectionServiceInducedErrors
+              Dimensions:
+                - Name: TableName
+                  Value: ConnectChaosCustomers
+                - Name: Operation
+                  Value: GetItem
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: putitem
+          MetricStat:
+            Metric:
+              Namespace: AWS/DynamoDB
+              MetricName: FaultInjectionServiceInducedErrors
+              Dimensions:
+                - Name: TableName
+                  Value: ConnectChaosCustomers
+                - Name: Operation
+                  Value: PutItem
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: total
+          Expression: 'SUM([getitem, putitem])'
+          Label: TotalFISInducedDDBErrors
+          ReturnData: true
+      EvaluationPeriods: 1
+      Threshold: !Ref DDBFaultErrorsThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
   AlarmLexRuntimeErrors:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub 'ConnectChaos-Lex-CodeHookLatency-${AWS::Region}'
-      AlarmDescription: 'Exp 3: Lex fulfillment code-hook latency (FIS invocation-add-delay)'
-      Namespace: AWS/Lambda
-      MetricName: Duration
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref LexFulfillmentHandler
-      # Maximum, not Average: one pathologically slow call must trip it even amid fast ones.
-      Statistic: Maximum
-      Period: 60
+      AlarmName: !Sub 'ConnectChaos-Lex-RuntimeLambdaErrors-${AWS::Region}'
+      AlarmDescription: 'Exp 3: Lex code hook timeout (sums across StartConversation/RecognizeUtterance/RecognizeText)'
+      Metrics:
+        # Lex V2 emits RuntimeLambdaErrors per Operation dimension. Amazon Connect integrates
+        # with Lex V2 over the *streaming* API, so real voice IVR traffic reports the
+        # Operation as StartConversation (InputMode=Speech) — NOT RecognizeUtterance.
+        # Ref: https://docs.aws.amazon.com/lexv2/latest/dg/contact-center.html
+        #      https://docs.aws.amazon.com/lexv2/latest/dg/streaming.html
+        # We also include RecognizeUtterance (non-streaming speech, e.g. the synthetic
+        # traffic generator) and RecognizeText (chat) so the alarm fires regardless of the
+        # invocation path. Valid RuntimeLambdaErrors dimensions: Operation, BotId,
+        # BotAliasId, InputMode, LocaleId.
+        - Id: strm
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lex
+              MetricName: RuntimeLambdaErrors
+              Dimensions:
+                - Name: BotId
+                  Value: !If [CreateLexLocally, !GetAtt ConnectChaosBot.Id, !Ref ReplicatedLexBotId]
+                - Name: BotAliasId
+                  Value: !If [CreateLexLocally, !GetAtt ConnectChaosBotAlias.BotAliasId, !Ref ReplicatedLexBotAliasId]
+                - Name: Operation
+                  Value: StartConversation
+                - Name: InputMode
+                  Value: Speech
+                - Name: LocaleId
+                  Value: en_US
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: utter
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lex
+              MetricName: RuntimeLambdaErrors
+              Dimensions:
+                - Name: BotId
+                  Value: !If [CreateLexLocally, !GetAtt ConnectChaosBot.Id, !Ref ReplicatedLexBotId]
+                - Name: BotAliasId
+                  Value: !If [CreateLexLocally, !GetAtt ConnectChaosBotAlias.BotAliasId, !Ref ReplicatedLexBotAliasId]
+                - Name: Operation
+                  Value: RecognizeUtterance
+                - Name: InputMode
+                  Value: Speech
+                - Name: LocaleId
+                  Value: en_US
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: txt
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lex
+              MetricName: RuntimeLambdaErrors
+              Dimensions:
+                - Name: BotId
+                  Value: !If [CreateLexLocally, !GetAtt ConnectChaosBot.Id, !Ref ReplicatedLexBotId]
+                - Name: BotAliasId
+                  Value: !If [CreateLexLocally, !GetAtt ConnectChaosBotAlias.BotAliasId, !Ref ReplicatedLexBotAliasId]
+                - Name: Operation
+                  Value: RecognizeText
+                - Name: InputMode
+                  Value: Text
+                - Name: LocaleId
+                  Value: en_US
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: total
+          Expression: 'SUM([strm, utter, txt])'
+          Label: TotalRuntimeLambdaErrors
+          ReturnData: true
       EvaluationPeriods: 1
-      # Milliseconds. Normal fulfillment is <1s; the injected delay drives Duration to ~31s.
-      Threshold: !Ref LexCodeHookLatencyThresholdMs
+      Threshold: !Ref RuntimeLambdaErrorsThreshold
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
@@ -944,8 +1003,7 @@ Resources:
         wait in ConnectChaos-Overflow exceeds the threshold (seconds).
       Namespace: AWS/Connect
       MetricName: LongestQueueWaitTime
-      # Verified dimensions for LongestQueueWaitTime: InstanceId, MetricGroup=Queue, QueueName
-      # Ref: https://docs.aws.amazon.com/connect/latest/adminguide/monitoring-cloudwatch.html
+      # Verified dimensions for LongestQueueWaitTime: InstanceId, MetricGroup=Queue, QueueName.
       Dimensions:
         - Name: InstanceId
           Value: !Ref ConnectInstanceId
@@ -953,7 +1011,7 @@ Resources:
           Value: Queue
         - Name: QueueName
           Value: ConnectChaos-Overflow
-      # Longest wait is a gauge, not a rate - use Maximum over the period.
+      # Longest wait is a gauge, not a rate — use Maximum over the period.
       Statistic: Maximum
       Period: 60
       EvaluationPeriods: 1
@@ -963,19 +1021,10 @@ Resources:
 
   CompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
-    # FIX: the AlarmRule references the child alarms by name inside a !Sub literal,
-    # so CloudFormation cannot infer the dependency. Without this explicit DependsOn
-    # the composite alarm races its members and create fails with
-    # "Could not save the composite alarm as alarms [...] in the alarm rule do not exist".
-    DependsOn:
-      - AlarmLambdaErrors
-      - AlarmContactFlowErrors
-      - AlarmLexRuntimeErrors
-      - AlarmQueueWait
     Properties:
       AlarmName: !Sub 'ConnectChaos-Composite-${AWS::Region}'
       AlarmDescription: ANY component alarm triggers ACGR failover
-      AlarmRule: !Sub 'ALARM("ConnectChaos-Lambda-Errors-${AWS::Region}") OR ALARM("ConnectChaos-ContactFlow-Errors-${AWS::Region}") OR ALARM("ConnectChaos-Lex-CodeHookLatency-${AWS::Region}") OR ALARM("ConnectChaos-QueueWait-${AWS::Region}")'
+      AlarmRule: !Sub 'ALARM("ConnectChaos-Lambda-Errors-${AWS::Region}") OR ALARM("ConnectChaos-DDB-FISInducedErrors-${AWS::Region}") OR ALARM("ConnectChaos-ContactFlow-Errors-${AWS::Region}") OR ALARM("ConnectChaos-Lex-RuntimeLambdaErrors-${AWS::Region}") OR ALARM("ConnectChaos-QueueWait-${AWS::Region}")'
       ActionsEnabled: true
       AlarmActions:
         - !Ref AlarmNotificationTopic
@@ -1017,10 +1066,43 @@ Resources:
       Tags:
         Name: ConnectChaos-Exp1-LambdaFailure
 
+  # ── Exp 2 (primary): DynamoDB Region isolation on the MRSC global table ──
+  # Pauses replication to/from THIS region. On an MRSC table this makes writes and strongly
+  # consistent reads in the isolated region fail with FIS-injected HTTP 500s, surfacing as
+  # AWS/DynamoDB FaultInjectionServiceInducedErrors. The fulfillment Lambda issues a
+  # strongly consistent GetItem, so the fault is application-visible and drives failover.
+  FISExperimentDDBRegionIsolation:
+    Type: AWS::FIS::ExperimentTemplate
+    Properties:
+      Description: 'Exp 2: DynamoDB MRSC Region isolation (pause global table replication)'
+      RoleArn: !GetAtt FISExecutionRole.Arn
+      StopConditions:
+        - Source: aws:cloudwatch:alarm
+          Value: !GetAtt AlarmDynamoDBFaultErrors.Arn
+      Targets:
+        GlobalTable:
+          ResourceType: aws:dynamodb:global-table
+          ResourceArns:
+            - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ConnectChaosCustomers'
+          SelectionMode: ALL
+      Actions:
+        PauseReplication:
+          ActionId: aws:dynamodb:global-table-pause-replication
+          Parameters:
+            duration: !Ref FISExperimentDuration
+          Targets:
+            Tables: GlobalTable
+      Tags:
+        Name: ConnectChaos-Exp2-DDBRegionIsolation
+
+  # ── Exp 2b (optional variant): DynamoDB unreachable at the network layer ──
+  # Kept as an alternative "dependency unreachable" fault. Observable client-side only
+  # (ContactFlowErrors) — it cannot produce AWS/DynamoDB metrics because the request never
+  # reaches DynamoDB. Prefer Exp 2 for a DynamoDB-attributable signal.
   FISExperimentDDBDisruption:
     Type: AWS::FIS::ExperimentTemplate
     Properties:
-      Description: 'Exp 2: DynamoDB network disruption (targets ALL Lambda subnets for deterministic blast radius)'
+      Description: 'Exp 2b (variant): DynamoDB network disruption (targets ALL Lambda subnets for deterministic blast radius)'
       RoleArn: !GetAtt FISExecutionRole.Arn
       StopConditions:
         - Source: aws:cloudwatch:alarm
@@ -1068,10 +1150,7 @@ Resources:
           Parameters:
             duration: !Ref FISExperimentDuration
             invocationPercentage: '100'
-            # 31s > Lex's 30s code-hook timeout for StartConversation, but < the Lambda's
-            # own 40s timeout. So LEX times out the code hook (→ RuntimeLambdaErrors) while
-            # the Lambda keeps running rather than throwing its own timeout error first.
-            startupDelayMilliseconds: '31000'
+            startupDelayMilliseconds: '15000'
           Targets:
             Functions: LambdaFunction
       Tags:
@@ -1111,7 +1190,7 @@ Resources:
       DashboardName: !Sub 'ConnectChaos-${AWS::Region}'
       DashboardBody: !Sub
         - |
-          {"widgets":[{"type":"metric","width":6,"height":6,"x":0,"y":0,"properties":{"title":"Exp 1: Lambda Errors","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":6,"y":0,"properties":{"title":"Exp 2: ContactFlowErrors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-MainIVR",{"stat":"Sum"}],["...","ConnectChaos-ChaosTest"]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":12,"y":0,"properties":{"title":"Exp 3: Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":0,"y":6,"properties":{"title":"Exp 4: Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}}]}
+          {"widgets":[{"type":"metric","width":6,"height":6,"x":0,"y":0,"properties":{"title":"Exp 1: Lambda Errors vs Invocations","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum"}],["AWS/Lambda","Invocations","FunctionName","LexFulfillmentHandler",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":6,"y":0,"properties":{"title":"Exp 2: DynamoDB FIS-Induced Errors","metrics":[["AWS/DynamoDB","FaultInjectionServiceInducedErrors","TableName","ConnectChaosCustomers","Operation","GetItem",{"stat":"Sum"}],["AWS/DynamoDB","SystemErrors","TableName","ConnectChaosCustomers","Operation","GetItem",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":6,"y":6,"properties":{"title":"Exp 2b: ContactFlowErrors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-MainIVR",{"stat":"Sum"}],["...","ConnectChaos-ChaosTest"]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":12,"y":0,"properties":{"title":"Exp 3: Lex RuntimeLambdaErrors","metrics":[["AWS/Lex","RuntimeLambdaErrors","BotId","${BotId}","BotAliasId","${BotAliasId}","Operation","StartConversation","InputMode","Speech","LocaleId","en_US",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":0,"y":6,"properties":{"title":"Exp 4: Queue Wait (Overflow)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}}]}
         - BotId: !If [CreateLexLocally, !GetAtt ConnectChaosBot.Id, !Ref ReplicatedLexBotId]
           BotAliasId: !If [CreateLexLocally, !GetAtt ConnectChaosBotAlias.BotAliasId, !Ref ReplicatedLexBotAliasId]
 
@@ -1122,7 +1201,7 @@ Resources:
       DashboardName: ConnectChaos-Unified
       DashboardBody: !Sub
         - |
-          {"widgets":[{"type":"text","width":24,"height":1,"x":0,"y":0,"properties":{"markdown":"## Primary Region (${PrimaryRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":1,"properties":{"title":"Lambda Errors","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":1,"properties":{"title":"ContactFlowErrors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-MainIVR",{"stat":"Sum","region":"${PrimaryRegion}"}],["...","ConnectChaos-ChaosTest"]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":1,"properties":{"title":"Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":1,"properties":{"title":"Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"text","width":24,"height":1,"x":0,"y":6,"properties":{"markdown":"## Paired Region (${PairedRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":7,"properties":{"title":"Lambda Errors","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":7,"properties":{"title":"ContactFlowErrors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${PairedInstanceIdEffective}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-MainIVR",{"stat":"Sum","region":"${PairedRegion}"}],["...","ConnectChaos-ChaosTest"]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":7,"properties":{"title":"Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":7,"properties":{"title":"Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${PairedInstanceIdEffective}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}}]}
+          {"widgets":[{"type":"text","width":24,"height":1,"x":0,"y":0,"properties":{"markdown":"## Primary Region (${PrimaryRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":1,"properties":{"title":"Lambda Errors vs Invocations","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum","region":"${PrimaryRegion}"}],["AWS/Lambda","Invocations","FunctionName","LexFulfillmentHandler",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":1,"properties":{"title":"DynamoDB FIS-Induced Errors","metrics":[["AWS/DynamoDB","FaultInjectionServiceInducedErrors","TableName","ConnectChaosCustomers","Operation","GetItem",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":1,"properties":{"title":"Lex RuntimeLambdaErrors","metrics":[["AWS/Lex","RuntimeLambdaErrors","BotId","${BotId}","BotAliasId","${BotAliasId}","Operation","StartConversation","InputMode","Speech","LocaleId","en_US",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":1,"properties":{"title":"Queue Wait (Overflow)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"text","width":24,"height":1,"x":0,"y":6,"properties":{"markdown":"## Paired Region (${PairedRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":7,"properties":{"title":"Lambda Errors vs Invocations","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum","region":"${PairedRegion}"}],["AWS/Lambda","Invocations","FunctionName","LexFulfillmentHandler",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":7,"properties":{"title":"DynamoDB FIS-Induced Errors","metrics":[["AWS/DynamoDB","FaultInjectionServiceInducedErrors","TableName","ConnectChaosCustomers","Operation","GetItem",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":7,"properties":{"title":"Lex RuntimeLambdaErrors","metrics":[["AWS/Lex","RuntimeLambdaErrors","BotId","${BotId}","BotAliasId","${BotAliasId}","Operation","StartConversation","InputMode","Speech","LocaleId","en_US",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":7,"properties":{"title":"Queue Wait (Overflow)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${PairedInstanceIdEffective}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}}]}
         - BotId: !GetAtt ConnectChaosBot.Id
           BotAliasId: !GetAtt ConnectChaosBotAlias.BotAliasId
           PairedInstanceIdEffective: !Ref PairedConnectInstanceId
@@ -1159,6 +1238,7 @@ Resources:
                       - AWS/Lambda
                       - AWS/Connect
                       - AWS/Lex
+                      - AWS/DynamoDB
 
   TrafficGeneratorFunction:
     Type: AWS::Lambda::Function
@@ -1181,6 +1261,7 @@ Resources:
           LAMBDA_FUNCTION_NAME: !Ref LexFulfillmentHandler
           QUEUE_NAME: ConnectChaos-Overflow
           QUEUE_WAIT_SECONDS: '120'
+          CUSTOMER_TABLE_NAME: ConnectChaosCustomers
           MODE: healthy
           CALLS_PER_MINUTE: '10'
 
@@ -1227,8 +1308,11 @@ Outputs:
     Value: !Ref FISExperimentLambdaFailure
     Description: Lambda Failure
   FISExperiment2:
+    Value: !Ref FISExperimentDDBRegionIsolation
+    Description: 'Exp 2: DynamoDB MRSC Region isolation (pause replication)'
+  FISExperiment2bNetworkVariant:
     Value: !Ref FISExperimentDDBDisruption
-    Description: DDB Disruption
+    Description: 'Exp 2b (variant): DynamoDB network disruption'
   FISExperiment3:
     Value: !Ref FISExperimentLexTimeout
     Description: Lex Timeout
