@@ -334,6 +334,22 @@ aws logs tail /aws/lambda/ConnectChaos-CallLogger --region $PRIMARY_REGION --sin
 `ContactFlowErrors` only increments for **real contacts**, so a live call is the true test
 here. Note that Lambda `Errors` will also rise — expected, see the cascade note.
 
+**Pass:**
+
+| Check | Expected |
+|---|---|
+| `ConnectChaos-ContactFlow-Errors-us-east-1` | `ALARM` |
+| `ConnectChaos-Composite-us-east-1` | `ALARM` |
+| Traffic distribution | primary `0` / paired `100` |
+| `ConnectChaos-TrafficShiftHandler` log | `Traffic shifted: us-east-1=0%, us-west-2=100%` |
+| `ConnectChaos-CallLogger` log | a DynamoDB timeout/connection error |
+
+**Partial pass to watch for:** if only `ConnectChaos-Lambda-Errors` fires and
+`ContactFlowErrors` stays flat, the fault reached the Lambda but the flow did not take its
+Error branch — that is the exact failure Fix 6 addressed. Check that the flow really invokes
+`ConnectChaos-CallLogger` before the Lex block, and that a **real contact** went through
+(synthetic metrics cannot exercise a flow branch).
+
 ➡️ **Step R.**
 
 ---
@@ -415,10 +431,27 @@ aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
 ```
 
-> This experiment has not yet been validated on real telephony. If the metric does not
-> appear, check the dimensions with
-> `aws cloudwatch list-metrics --namespace AWS/Connect --metric-name LongestQueueWaitTime`
-> and compare against the alarm.
+**Pass:**
+
+| Check | Expected |
+|---|---|
+| `LongestQueueWaitTime` (Maximum) | a datapoint **> 60 s** for `QueueName=ConnectChaos-Overflow` |
+| `ConnectChaos-QueueWait-us-east-1` | `ALARM` |
+| `ConnectChaos-Composite-us-east-1` | `ALARM` |
+| Traffic distribution | primary `0` / paired `100` |
+| `LexFulfillmentHandler` log | `CHAOS FLAG ENABLED` (or equivalent) — proves the flag was read |
+
+**Two things that produce a false negative here:**
+
+1. **Hanging up too early.** The threshold is 60 s of *queue wait*, so the contact has to sit
+   in the queue past that. Stay on the line for at least 90 s after the transfer.
+2. **Calling the wrong flow.** The chaos flag path is in **`ConnectChaos-ChaosTest`**, not the
+   Main IVR. If your phone number points at the Main IVR you will see the Lex failure but no
+   queue transfer, so no queue wait accumulates.
+
+> This experiment has not yet been validated on real telephony — this run is its first test.
+> If the metric never appears, list the real dimensions and compare them against the alarm:
+> `aws cloudwatch list-metrics --namespace AWS/Connect --metric-name LongestQueueWaitTime --region us-east-1`
 
 ➡️ **Step R** (and confirm the flag is off).
 
