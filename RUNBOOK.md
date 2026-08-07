@@ -16,6 +16,66 @@ verifying before moving on.
 
 ---
 
+## Live deployment — copy/paste for the current environment
+
+> **This section describes the stack that is deployed right now** in account
+> `101506645078`, IAD ↔ PDX. Every value was read back from the deployment. If you are
+> deploying fresh somewhere else, skip this and use the generic sections below.
+>
+> **Steps 1 and 2 (pre-flight and deploy) are already DONE.** Both stacks are
+> `CREATE_COMPLETE` and traffic is reset to IAD 100% / PDX 0%. Start at **step 3**.
+
+```bash
+export PRIMARY_REGION=us-east-1
+export PAIRED_REGION=us-west-2
+export STACK=connect-chaos-sample
+export ACCT=101506645078
+
+# ACGR replica: the SAME instance id exists in both regions
+export INSTANCE_ID=f4d29ac8-fcfc-4cc1-be06-545ac29aefe9
+export PRIMARY_INSTANCE_ARN=arn:aws:connect:$PRIMARY_REGION:$ACCT:instance/$INSTANCE_ID
+export PAIRED_INSTANCE_ARN=arn:aws:connect:$PAIRED_REGION:$ACCT:instance/$INSTANCE_ID
+
+# tdg2 — the TDG that has the ported number attached
+export TDG_ID=fb104a2a-3e14-41b1-b4ab-a9afec8e0685
+export PHONE="+44 808 547 8029"
+
+# FIS experiment templates (from the primary stack outputs)
+export EXP1=EXTr1GJfcSvf1BW        # Lambda invocation error
+export EXP2=EXT52xQ3YYqgvC2kx      # DynamoDB network disruption
+export EXP3=EXT2JeAjdNb4wBM2g      # Lex code-hook latency
+export GEN=ConnectChaos-TrafficGenerator-$PRIMARY_REGION
+```
+
+### What is deployed
+
+| Component | us-east-1 (IAD) | us-west-2 (PDX) |
+|---|---|---|
+| Stack | `CREATE_COMPLETE` | `CREATE_COMPLETE` |
+| Lex bot / alias | `QJ5VLLR4GH` / `IYOEXZUVAZ` | `QJ5VLLR4GH` *(Lex GR, Available)* |
+| VPC | `vpc-0f6018164a8383055` | `vpc-0abb4de0b0af63282` |
+| Gateway endpoints | DynamoDB + S3 | DynamoDB + S3 |
+| NAT gateways | 0 | 0 |
+| Tables | `connect-chaos-sample-{Customers,Config,CallLog}` | replicas |
+| Overflow queue | `ConnectChaos-Overflow` `7b4d65cb-7d5b-423f-b279-bc668f7bcee4` | ACGR-replicated |
+| Alarms | 4 component + composite, all `OK` | 4 + composite |
+| Failover rule | `ConnectChaos-Failover-us-east-1` `ENABLED` | `ENABLED` |
+
+A visual walkthrough of the injection points and the failover chain, with these same IDs,
+is in **[docs/BLOCK-DIAGRAM.md](docs/BLOCK-DIAGRAM.md)**.
+
+### Recommended test order for this deployment
+
+1. **Seed the tables** (step 3) — they are new and empty.
+2. **Baseline call** (step 3a) — proves the healthy path AND settles whether a VPC Lambda
+   writes CloudWatch Logs with only DynamoDB and S3 gateway endpoints.
+3. **Experiment 2 first** — it is the only fault with **no ~180 s window**, so it is the
+   most forgiving to verify and the best first proof of the failover chain.
+4. Then Experiment 4, then 1 and 3 (both need a call within ~3 minutes).
+5. Finally the **paired-region proof** — a call answered in PDX.
+
+---
+
 ## 0. Shell variables
 
 ```bash
@@ -37,7 +97,7 @@ You do **not** need a VPC, subnets, a security group, an S3 bucket, or the FIS l
 
 ---
 
-## 1. Pre-flight
+## 1. Pre-flight  *(already done for the live deployment)*
 
 ```bash
 # ACGR pair: the SAME instance id must appear in both regions
@@ -70,7 +130,7 @@ aws dynamodb list-tables --region $PRIMARY_REGION \
 
 ---
 
-## 2. Deploy both regions
+## 2. Deploy both regions  *(already done for the live deployment)*
 
 ```bash
 make deploy-pair STACK=$STACK \

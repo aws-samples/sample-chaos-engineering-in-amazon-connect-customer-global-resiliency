@@ -19,7 +19,7 @@ tell *which* layer broke.
 > ORs all four component alarms, so failover happens regardless. When demonstrating a
 > *specific* experiment, watch **that experiment's own alarm**, not the composite.
 
-**New here?** Follow **[RUNBOOK.md](RUNBOOK.md)** — a sequential deploy-then-test guide with
+**New here?** Follow **[RUNBOOK.md](RUNBOOK.md)**, which also carries a copy/paste block for the currently deployed environment — a sequential deploy-then-test guide with
 pre-flight checks, expected results, and the mandatory reset step between experiments.
 
 ---
@@ -27,6 +27,11 @@ pre-flight checks, expected results, and the mandatory reset step between experi
 ## Architecture
 
 ![Architecture](docs/architecture.png)
+
+> **[docs/BLOCK-DIAGRAM.md](docs/BLOCK-DIAGRAM.md)** is the detailed block diagram: the call
+> path, all four chaos injection points with their timing constraints, and the full
+> detection-to-failover chain — annotated with the real resource IDs from a verified
+> deployment.
 
 > Diagram source is `docs/architecture.dac.yaml`. Regenerate the PNG with
 > `awsdac docs/architecture.dac.yaml --output docs/architecture.png`.
