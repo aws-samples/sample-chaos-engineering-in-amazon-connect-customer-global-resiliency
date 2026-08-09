@@ -88,6 +88,55 @@ not an idealised design.
 
 ---
 
+## 1b. Deploy is not enough — three manual steps
+
+CloudFormation builds every box above, but the contact centre will **not answer a call**
+until these are done. `make post-deploy` performs all three and is safe to re-run.
+
+```
+  make deploy-pair            creates ALL infrastructure in both regions
+        │
+        ▼
+  make post-deploy            ┌─ 1. seed DynamoDB (customer 12345, chaos_flag=false)
+                              ├─ 2. associate the phone number with ConnectChaos-MainIVR
+                              └─ 3. reset traffic to 100% primary / 0% paired
+        │
+        ▼
+  make verify                 PASS/FAIL per check, including whether the PAIRED
+                              region can actually serve a call
+        │
+        ▼
+  baseline call               the only real proof of the number -> flow link,
+                              because no AWS API exposes it
+```
+
+**Step 2 cannot be a CloudFormation resource.** The phone number belongs to the Traffic
+Distribution Group, not to the stack, and no resource type models the number → flow link.
+Skipping it is a **silent** failure: every resource reports `CREATE_COMPLETE`, every alarm
+reports `OK`, and calls never enter the flow, with nothing indicating why.
+
+### ⚠️ Lex GR: verify the replica, and verify the ALIAS
+
+The `Replication` property on `AWS::Lex::Bot` is **not** sufficient evidence that the paired
+region is usable. On this deployment the replica it created was present right after deploy
+and had **vanished ~40 minutes later**, with no CloudTrail record of its creation or removal
+(FIXES.md Fix 14). It had to be established explicitly:
+
+```
+aws lexv2-models create-bot-replica --bot-id <id> --replica-region <paired> --region <primary>
+
+  bot   replica   Enabling  -> Enabled     ~30 s
+  ALIAS replica   Creating  -> Available   ~90 s   ← the flow resolves to the ALIAS
+```
+
+The bot replica reaching `Enabled` is **not** enough. The flow's
+`arn:aws:lex:$.AwsRegion:…:bot-alias/<botId>/<aliasId>` resolves to the **alias**, so the
+paired region cannot serve a call until the *alias* replica is `Available`.
+
+Always confirm with `make verify` before demonstrating a failover.
+
+---
+
 ## 2. Inducing the chaos — four injection points
 
 ```
