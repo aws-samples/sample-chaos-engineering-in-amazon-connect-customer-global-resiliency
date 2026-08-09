@@ -27,8 +27,11 @@ OUT = ROOT / "contact-flows"
 
 # Logical id in the template -> generated file name.
 FLOWS = {
-    "MainIVRFlow": "main-ivr-flow.json",
-    "ChaosTestFlow": "chaos-test-flow.json",
+    "MenuFlow": "menu-flow.json",
+    "Exp1Flow": "exp1-lambda-flow.json",
+    "Exp2Flow": "exp2-dynamodb-flow.json",
+    "Exp3Flow": "exp3-latency-flow.json",
+    "Exp4Flow": "exp4-queue-flow.json",
 }
 
 # CloudFormation intrinsics -> placeholders a reader can substitute by hand.
@@ -39,6 +42,11 @@ SUBS = [
     (r"\$\{ConnectChaosBot\.Id\}", "BOT_ID"),
     (r"\$\{ConnectChaosBotAlias\.BotAliasId\}", "BOT_ALIAS_ID"),
     (r"\$\{CallLoggerHandler\}", "ConnectChaos-CallLogger"),
+    (r"\$\{AccountLookupHandler\}", "ConnectChaos-AccountLookup"),
+    (r"\$\{Exp1Flow\}", "EXP1_FLOW_ID"),
+    (r"\$\{Exp2Flow\}", "EXP2_FLOW_ID"),
+    (r"\$\{Exp3Flow\}", "EXP3_FLOW_ID"),
+    (r"\$\{Exp4Flow\}", "EXP4_FLOW_ID"),
     (r"\$\{ChaosOverflowQueue\.QueueArn\}", "OVERFLOW_QUEUE_ARN"),
 ]
 

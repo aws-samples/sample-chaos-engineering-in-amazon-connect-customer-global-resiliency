@@ -6,30 +6,13 @@
       "Identifier": "entry",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "Welcome to customer service. I can help you look up your account or check an order."
-      },
-      "Transitions": {
-        "NextAction": "log-call",
-        "Errors": [
-          {
-            "NextAction": "error-msg",
-            "ErrorType": "NoMatchingError"
-          }
-        ]
-      }
-    },
-    {
-      "Identifier": "log-call",
-      "Type": "InvokeLambdaFunction",
-      "Parameters": {
-        "LambdaFunctionARN": "arn:aws:lambda:$.AwsRegion:ACCOUNT_ID:function:ConnectChaos-CallLogger",
-        "InvocationTimeLimitSeconds": "8"
+        "Text": "Connected in region $.AwsRegion. Experiment three, speech latency."
       },
       "Transitions": {
         "NextAction": "lex-input",
         "Errors": [
           {
-            "NextAction": "error-msg",
+            "NextAction": "lex-input",
             "ErrorType": "NoMatchingError"
           }
         ]
@@ -45,10 +28,10 @@
         }
       },
       "Transitions": {
-        "NextAction": "success-msg",
+        "NextAction": "ok",
         "Conditions": [
           {
-            "NextAction": "success-msg",
+            "NextAction": "ok",
             "Condition": {
               "Operator": "Equals",
               "Operands": [
@@ -57,7 +40,7 @@
             }
           },
           {
-            "NextAction": "success-msg",
+            "NextAction": "ok",
             "Condition": {
               "Operator": "Equals",
               "Operands": [
@@ -68,18 +51,18 @@
         ],
         "Errors": [
           {
-            "NextAction": "error-msg",
+            "NextAction": "lex-slow",
             "ErrorType": "NoMatchingError"
           },
           {
-            "NextAction": "error-msg",
+            "NextAction": "lex-slow",
             "ErrorType": "NoMatchingCondition"
           }
         ]
       }
     },
     {
-      "Identifier": "success-msg",
+      "Identifier": "ok",
       "Type": "MessageParticipant",
       "Parameters": {
         "Text": "I found your information. Transferring to an agent."
@@ -95,10 +78,10 @@
       }
     },
     {
-      "Identifier": "error-msg",
+      "Identifier": "lex-slow",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "We are experiencing difficulties. Please try again later."
+        "Text": "The lookup service is taking too long. This is experiment three."
       },
       "Transitions": {
         "NextAction": "disconnect",

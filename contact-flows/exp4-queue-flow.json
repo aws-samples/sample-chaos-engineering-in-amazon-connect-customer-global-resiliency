@@ -6,13 +6,13 @@
       "Identifier": "entry",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "Welcome. Let me look up your information."
+        "Text": "Connected in region $.AwsRegion. Experiment four, queue overflow."
       },
       "Transitions": {
         "NextAction": "lex-input",
         "Errors": [
           {
-            "NextAction": "error-path",
+            "NextAction": "lex-input",
             "ErrorType": "NoMatchingError"
           }
         ]
@@ -28,10 +28,10 @@
         }
       },
       "Transitions": {
-        "NextAction": "success-path",
+        "NextAction": "ok",
         "Conditions": [
           {
-            "NextAction": "success-path",
+            "NextAction": "ok",
             "Condition": {
               "Operator": "Equals",
               "Operands": [
@@ -40,7 +40,7 @@
             }
           },
           {
-            "NextAction": "success-path",
+            "NextAction": "ok",
             "Condition": {
               "Operator": "Equals",
               "Operands": [
@@ -51,21 +51,21 @@
         ],
         "Errors": [
           {
-            "NextAction": "error-path",
+            "NextAction": "overflow-msg",
             "ErrorType": "NoMatchingError"
           },
           {
-            "NextAction": "error-path",
+            "NextAction": "overflow-msg",
             "ErrorType": "NoMatchingCondition"
           }
         ]
       }
     },
     {
-      "Identifier": "success-path",
+      "Identifier": "ok",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "Found your info. Transferring to an agent."
+        "Text": "I found your information. Transferring to an agent."
       },
       "Transitions": {
         "NextAction": "disconnect",
@@ -78,16 +78,16 @@
       }
     },
     {
-      "Identifier": "error-path",
+      "Identifier": "overflow-msg",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "We are experiencing technical difficulties. Please hold for the next available agent."
+        "Text": "All agents are currently busy. Please hold. This is experiment four."
       },
       "Transitions": {
         "NextAction": "set-overflow-queue",
         "Errors": [
           {
-            "NextAction": "disconnect",
+            "NextAction": "set-overflow-queue",
             "ErrorType": "NoMatchingError"
           }
         ]

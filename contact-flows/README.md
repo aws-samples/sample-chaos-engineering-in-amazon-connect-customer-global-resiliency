@@ -54,8 +54,33 @@ indefinitely, driving `LongestQueueWaitTime` (`FIXES.md` Fix 9).
 
 | File | Description |
 |------|-------------|
-| `main-ivr-flow.json` | Main IVR — greeting, call-logger invoke, Lex bot, success/error paths |
-| `chaos-test-flow.json` | Chaos test — failure path transfers to the no-agent overflow queue |
+| `menu-flow.json` | Entry flow. Announces `$.AwsRegion`, then a DTMF menu that transfers to one experiment flow per digit. **The phone number points here.** |
+| `exp1-lambda-flow.json` | Exp 1 — "Store customer input" collects the account number as DTMF, then a direct `InvokeLambdaFunction` to `ConnectChaos-AccountLookup`. FIS errors that block. |
+| `exp2-dynamodb-flow.json` | Exp 2 — direct `InvokeLambdaFunction` to `ConnectChaos-CallLogger` (the audit write FIS breaks by severing DynamoDB). |
+| `exp3-latency-flow.json` | Exp 3 — Lex block whose code hook FIS delays ~31 s. |
+| `exp4-queue-flow.json` | Exp 4 — failure path transfers to the no-agent overflow queue. |
+
+## One flow per experiment, and why
+
+`AWS/Connect` publishes exactly one metric meaning "a flow failed" — `ContactFlowErrors` — but
+it carries a `ContactFlowName` dimension. Giving each experiment its own flow is therefore the
+only way to get independent, Connect-native signals per experiment: same metric name, different
+dimension, no metric math, no overlap.
+
+Two consequences worth knowing:
+
+- **The call logger appears in exactly one flow.** If every flow invoked it, an Exp 2 fault
+  would raise `ContactFlowErrors` on all four dimensions simultaneously and destroy the
+  attribution.
+- **DTMF digits can drop immediately after a `TransferToFlow`.** AWS documents this: input
+  entered before the next flow's prompt finishes may be truncated. Each experiment flow opens
+  with the region announcement and a prompt before collecting, so a caller naturally waits.
+
+Only `NoMatchingError` / `NoMatchingCondition` / `InputTimeLimitExceeded` / `InvalidPhoneNumber`
+are valid error types, and **which ones are permitted differs per action** — `Compare` accepts
+only `NoMatchingCondition`, `InvokeLambdaFunction` only `NoMatchingError`, and
+`GetParticipantInput` with `StoreInput=True` must not declare `NoMatchingCondition`. Declaring
+a disallowed type fails flow creation with `InvalidContactFlowException` (`FIXES.md` Fix 2).
 
 ## Updating flows
 

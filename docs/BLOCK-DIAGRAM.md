@@ -27,7 +27,7 @@ not an idealised design.
       Connect instance f4d29ac8-fcfc-4cc1-be06-545ac29aefe9
      ═══════════════════════════════════════════════════════════════════════════
 
-        ConnectChaos-MainIVR  (contact flow)
+        ConnectChaos-Menu  ->  ConnectChaos-Exp{1,2,3,4}-*  (contact flows)
         ┌──────────────────────────────────────────────────────────────┐
         │ 1  entry              play greeting                          │
         │            │                                                 │
@@ -98,7 +98,7 @@ until these are done. `make post-deploy` performs all three and is safe to re-ru
         │
         ▼
   make post-deploy            ┌─ 1. seed DynamoDB (customer 12345, chaos_flag=false)
-                              ├─ 2. associate the phone number with ConnectChaos-MainIVR
+                              ├─ 2. associate the phone number with ConnectChaos-Menu
                               └─ 3. reset traffic to 100% primary / 0% paired
         │
         ▼
@@ -193,10 +193,10 @@ Always confirm with `make verify` before demonstrating a failover.
   ┌──────────────────────────────────────────────────────────────────────────┐
   │ STEP 1   component alarms  (us-east-1)                                   │
   │                                                                          │
-  │   ConnectChaos-Lambda-Errors-us-east-1          ◄── Exp 1                │
-  │   ConnectChaos-ContactFlow-Errors-us-east-1     ◄── Exp 2                │
-  │   ConnectChaos-Lex-CodeHookLatency-us-east-1    ◄── Exp 3  (> 7000 ms)   │
-  │   ConnectChaos-QueueWait-us-east-1              ◄── Exp 4  (> 60 s)      │
+  │   ConnectChaos-Exp1-Lambda-us-east-1          ◄── Exp 1                │
+  │   ConnectChaos-Exp2-DynamoDB-us-east-1     ◄── Exp 2                │
+  │   ConnectChaos-Exp3-Latency-us-east-1    ◄── Exp 3  (> 7000 ms)   │
+  │   ConnectChaos-Exp4-Queue-us-east-1              ◄── Exp 4  (> 60 s)      │
   └───────────────────────────────┬──────────────────────────────────────────┘
                                   │  any ONE of them
   ┌───────────────────────────────▼──────────────────────────────────────────┐
@@ -242,7 +242,7 @@ idempotency guard means both regions alarming at once cannot fight each other.
      PAIRED — us-west-2 (PDX)        acgr-saml-demo-iad-dr
      Connect instance f4d29ac8-fcfc-4cc1-be06-545ac29aefe9   (SAME id — ACGR replica)
 
-       ConnectChaos-MainIVR   (ACGR-replicated, byte-identical content)
+       ConnectChaos-Menu + 4  (ACGR-replicated, byte-identical content)
               │
               │  Lex ARN resolves via $.AwsRegion  →  arn:aws:lex:us-west-2:…
               ▼

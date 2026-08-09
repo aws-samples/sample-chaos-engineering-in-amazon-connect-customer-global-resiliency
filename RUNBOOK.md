@@ -204,7 +204,7 @@ make post-deploy STACK=$STACK \
 ```
 
 `post-deploy` does all three manual steps and is safe to re-run: seeds the tables,
-associates the number with **`ConnectChaos-MainIVR`**, and resets traffic to
+associates the number with **`ConnectChaos-Menu`**, wires Lex in the paired region, and resets traffic to
 100% primary / 0% paired.
 
 Then confirm the environment before spending any calls:
@@ -218,8 +218,11 @@ make verify STACK=$STACK PRIMARY_REGION=$PRIMARY_REGION \
 data, the traffic split and the alarms. It cannot check the number → flow link itself —
 **no AWS API exposes it** — so the baseline call below is the only real proof of that.
 
-> Experiment 4 uses a **different** flow (`ConnectChaos-ChaosTest`). Re-point the number for
-> that test, then point it back. See Experiment 4.
+> **One entry point for everything.** The number stays associated with `ConnectChaos-Menu`
+> for all four experiments — you never re-point it. Every call announces the serving region,
+> then offers a DTMF menu: press **1** for Experiment 1, **2** for 2, **3** for 3, **4** for 4.
+> The digit selects which flow runs, and therefore which `ContactFlowName` dimension the
+> metric lands on.
 
 ---
 
@@ -260,8 +263,15 @@ aws cloudwatch describe-alarms --region $PRIMARY_REGION --alarm-types CompositeA
 
 ### 3a. Baseline call — prove the healthy path first
 
-Call the number attached to your TDG and complete the IVR (say "look up my account", then
-"one two three four five"). Then confirm the **primary** region served it:
+Call the number attached to your TDG. You should hear **"Connected in region us-east-1"**
+(or whichever region is primary) — that announcement alone tells you where the call landed.
+Press **1**, then key **12345** on the keypad. Expect *"Welcome back, John Doe."*
+
+Use the keypad, not speech. Account numbers are collected as DTMF precisely because ASR
+mis-transcribed "one two three four five" as `120345` and once as `0` during testing, which
+looks exactly like a broken lookup.
+
+Then confirm the **primary** region served it:
 
 ```bash
 aws logs tail /aws/lambda/LexFulfillmentHandler --region $PRIMARY_REGION --since 5m
@@ -310,10 +320,18 @@ aws cloudwatch describe-alarms --region $PRIMARY_REGION --alarm-name-prefix Conn
 
 ---
 
-## Experiment 1 — Lambda invocation failure
+## Experiment 1 — Account-lookup Lambda fails
 
-**Fault:** every `LexFulfillmentHandler` invocation is marked failed without running.
-**Expect:** `AWS/Lambda Errors` → `ConnectChaos-Lambda-Errors-{region}` ALARM.
+**Fault:** every `ConnectChaos-AccountLookup` invocation is marked failed without running.
+**Expect:** the flow takes its `InvokeLambdaFunction` Error branch → `AWS/Connect
+ContactFlowErrors` for `ConnectChaos-Exp1-Lambda` → `ConnectChaos-Exp1-Lambda-{region}` ALARM.
+
+**Press 1**, then key any 5 digits. Expect *"The account lookup service is unavailable. This
+is experiment one."*
+
+> A `NOT_FOUND` or `INVALID_INPUT` result is **not** a fault: those return normally and the
+> flow branches on them with a `Compare` block. Only a genuine invocation failure reaches the
+> Error branch, which is what makes the metric attributable.
 
 ```bash
 aws fis start-experiment --experiment-template-id $EXP1 --region $PRIMARY_REGION \
@@ -330,7 +348,7 @@ aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
 Verify in order:
 
 ```bash
-aws cloudwatch describe-alarms --alarm-names ConnectChaos-Lambda-Errors-$PRIMARY_REGION \
+aws cloudwatch describe-alarms --alarm-names ConnectChaos-Exp1-Lambda-$PRIMARY_REGION \
   --region $PRIMARY_REGION --query "MetricAlarms[0].StateValue"
 
 aws cloudwatch describe-alarms --alarm-types CompositeAlarm \
@@ -355,7 +373,7 @@ aws logs tail /aws/lambda/ConnectChaos-TrafficShiftHandler --region $PRIMARY_REG
 **Fault:** both Lambda subnets blocked from the DynamoDB endpoint at the NACL. No 180 s
 window — the path stays severed for the whole experiment.
 **Expect:** the flow's direct call-logger invoke fails → flow Error branch →
-`ContactFlowErrors` → `ConnectChaos-ContactFlow-Errors-{region}` ALARM.
+`ContactFlowErrors` → `ConnectChaos-Exp2-DynamoDB-{region}` ALARM.
 
 ```bash
 aws fis start-experiment --experiment-template-id $EXP2 --region $PRIMARY_REGION \
@@ -370,7 +388,7 @@ aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
 ```
 
 ```bash
-aws cloudwatch describe-alarms --alarm-names ConnectChaos-ContactFlow-Errors-$PRIMARY_REGION \
+aws cloudwatch describe-alarms --alarm-names ConnectChaos-Exp2-DynamoDB-$PRIMARY_REGION \
   --region $PRIMARY_REGION --query "MetricAlarms[0].StateValue"
 
 # the call logger should show DynamoDB failures
@@ -384,13 +402,13 @@ here. Note that Lambda `Errors` will also rise — expected, see the cascade not
 
 | Check | Expected |
 |---|---|
-| `ConnectChaos-ContactFlow-Errors-us-east-1` | `ALARM` |
+| `ConnectChaos-Exp2-DynamoDB-us-east-1` | `ALARM` |
 | `ConnectChaos-Composite-us-east-1` | `ALARM` |
 | Traffic distribution | primary `0` / paired `100` |
 | `ConnectChaos-TrafficShiftHandler` log | `Traffic shifted: us-east-1=0%, us-west-2=100%` |
 | `ConnectChaos-CallLogger` log | a DynamoDB timeout/connection error |
 
-**Partial pass to watch for:** if only `ConnectChaos-Lambda-Errors` fires and
+**Partial pass to watch for:** if only `ConnectChaos-Exp1-Lambda` fires and
 `ContactFlowErrors` stays flat, the fault reached the Lambda but the flow did not take its
 Error branch — that is the exact failure Fix 6 addressed. Check that the flow really invokes
 `ConnectChaos-CallLogger` before the Lex block, and that a **real contact** went through
@@ -405,7 +423,7 @@ Error branch — that is the exact failure Fix 6 addressed. Check that the flow 
 **Fault:** ~31 s startup delay injected while the function timeout is 40 s, so the code hook
 is slow but still returns cleanly.
 **Expect:** `LexFulfillmentHandler` `Duration` Maximum spikes to ~31 000 ms →
-`ConnectChaos-Lex-CodeHookLatency-{region}` ALARM.
+`ConnectChaos-Exp3-Latency-{region}` ALARM.
 
 ```bash
 aws fis start-experiment --experiment-template-id $EXP3 --region $PRIMARY_REGION \
@@ -415,7 +433,7 @@ aws fis start-experiment --experiment-template-id $EXP3 --region $PRIMARY_REGION
 **⚠️ Call within 180 seconds.**
 
 ```bash
-aws cloudwatch describe-alarms --alarm-names ConnectChaos-Lex-CodeHookLatency-$PRIMARY_REGION \
+aws cloudwatch describe-alarms --alarm-names ConnectChaos-Exp3-Latency-$PRIMARY_REGION \
   --region $PRIMARY_REGION --query "MetricAlarms[0].StateValue"
 
 aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Duration \
@@ -439,17 +457,19 @@ returns successfully — this is what separates Exp 3 from Exp 1).
 ## Experiment 4 — Contact flow failure → no-agent queue
 
 **Fault:** a DynamoDB chaos flag makes the fulfillment Lambda return `Failed` to Lex. The
-Chaos Test flow's failure path sets `ConnectChaos-Overflow` (no routing profile, so no agent
-can ever receive its contacts) and transfers the contact there.
+`ConnectChaos-Exp4-Queue` flow's failure path sets `ConnectChaos-Overflow` (no routing
+profile, so no agent can ever receive its contacts) and transfers the contact there.
+
+**Press 4** from the menu.
 **Expect:** `LongestQueueWaitTime` climbs past the threshold (default 60 s) →
-`ConnectChaos-QueueWait-{region}` ALARM.
+`ConnectChaos-Exp4-Queue-{region}` ALARM.
 
 ```bash
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":true}}'
 ```
 
-Call the **Chaos Test** flow and **stay on the line past the threshold**, or:
+Call, press **4**, and **stay on the line past the threshold**, or:
 
 ```bash
 aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
@@ -457,7 +477,7 @@ aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
 ```
 
 ```bash
-aws cloudwatch describe-alarms --alarm-names ConnectChaos-QueueWait-$PRIMARY_REGION \
+aws cloudwatch describe-alarms --alarm-names ConnectChaos-Exp4-Queue-$PRIMARY_REGION \
   --region $PRIMARY_REGION --query "MetricAlarms[0].StateValue"
 
 aws cloudwatch get-metric-statistics --namespace AWS/Connect \
@@ -482,7 +502,7 @@ aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
 | Check | Expected |
 |---|---|
 | `LongestQueueWaitTime` (Maximum) | a datapoint **> 60 s** for `QueueName=ConnectChaos-Overflow` |
-| `ConnectChaos-QueueWait-us-east-1` | `ALARM` |
+| `ConnectChaos-Exp4-Queue-us-east-1` | `ALARM` |
 | `ConnectChaos-Composite-us-east-1` | `ALARM` |
 | Traffic distribution | primary `0` / paired `100` |
 | `LexFulfillmentHandler` log | `CHAOS FLAG ENABLED` (or equivalent) — proves the flag was read |
@@ -491,7 +511,7 @@ aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
 
 1. **Hanging up too early.** The threshold is 60 s of *queue wait*, so the contact has to sit
    in the queue past that. Stay on the line for at least 90 s after the transfer.
-2. **Calling the wrong flow.** The chaos flag path is in **`ConnectChaos-ChaosTest`**, not the
+2. **Choosing the wrong menu option.** The chaos flag path is in **`ConnectChaos-Exp4-Queue`**, not the
    Main IVR. If your phone number points at the Main IVR you will see the Lex failure but no
    queue transfer, so no queue wait accumulates.
 
@@ -538,10 +558,10 @@ Then restore with **Step R**.
 
 | # | Experiment | Trigger | Alarm | 180 s window |
 |:-:|---|---|---|:-:|
-| 1 | Lambda failure | `start-experiment $EXP1` | `ConnectChaos-Lambda-Errors-*` | **yes** |
-| 2 | DynamoDB unreachable | `start-experiment $EXP2` | `ConnectChaos-ContactFlow-Errors-*` | no |
-| 3 | Lex code-hook latency | `start-experiment $EXP3` | `ConnectChaos-Lex-CodeHookLatency-*` | **yes** |
-| 4 | Flow failure → no-agent queue | set `chaos_flag=true` | `ConnectChaos-QueueWait-*` | no |
+| 1 | Lambda failure | `start-experiment $EXP1` | `ConnectChaos-Exp1-Lambda-*` | **yes** |
+| 2 | DynamoDB unreachable | `start-experiment $EXP2` | `ConnectChaos-Exp2-DynamoDB-*` | no |
+| 3 | Lex code-hook latency | `start-experiment $EXP3` | `ConnectChaos-Exp3-Latency-*` | **yes** |
+| 4 | Flow failure → no-agent queue | set `chaos_flag=true` | `ConnectChaos-Exp4-Queue-*` | no |
 
 Step R after every one.
 

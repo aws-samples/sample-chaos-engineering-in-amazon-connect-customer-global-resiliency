@@ -74,48 +74,80 @@ pre-flight checks, expected results, and the mandatory reset step between experi
 
 ## Experiments
 
-| # | Component | Fault | Attributing metric | Namespace |
-|---|-----------|-------|--------------------|-----------|
-| **1** | Lambda | `aws:lambda:invocation-error` (`preventExecution`) | `Errors` | AWS/Lambda |
-| **2** | DynamoDB | `aws:network:disrupt-connectivity` scope=`dynamodb` | `ContactFlowErrors` | AWS/Connect |
-| **3** | Lex code hook | `aws:lambda:invocation-add-delay` (~31 s) | `Duration` (Maximum) | AWS/Lambda |
-| **4** | Contact flow | DynamoDB chaos flag → no-agent queue | `LongestQueueWaitTime` | AWS/Connect |
+| # | DTMF | Component | Fault | Attributing metric | Namespace |
+|---|:---:|-----------|-------|--------------------|-----------|
+| **1** | `1` | Account-lookup Lambda | `aws:lambda:invocation-error` (`preventExecution`) | `ContactFlowErrors` on `ConnectChaos-Exp1-Lambda` | AWS/Connect |
+| **2** | `2` | DynamoDB | `aws:network:disrupt-connectivity` scope=`dynamodb` | `ContactFlowErrors` on `ConnectChaos-Exp2-DynamoDB` | AWS/Connect |
+| **3** | `3` | Lex code hook | `aws:lambda:invocation-add-delay` (~31 s) | `Duration` (Maximum) | AWS/Lambda |
+| **4** | `4` | Contact flow | DynamoDB chaos flag → no-agent queue | `LongestQueueWaitTime` on `ConnectChaos-Overflow` | AWS/Connect |
 
-### Experiment 1 — Lambda invocation failure
-FIS marks every `LexFulfillmentHandler` invocation as failed without running the code.
-- **Alarm:** `ConnectChaos-Lambda-Errors-{region}` (threshold `LambdaErrorsThreshold`, default `0` — one failed invocation is enough)
+### How each experiment is kept distinguishable
+
+Amazon Connect publishes exactly **one** metric meaning "a flow failed" — `ContactFlowErrors`
+— but it is dimensioned by `ContactFlowName`. Each experiment therefore gets **its own flow**,
+which turns that single metric into independent per-experiment signals with no metric math and
+no overlap. Three of the four alarms are Connect-native as a result.
+
+Every call starts in **`ConnectChaos-Menu`**, which announces the serving region and offers a
+DTMF menu; the digit you press selects the experiment's flow. DTMF rather than speech is
+deliberate: during testing ASR turned "one two three four five" into `120345` and once into
+`0`, which is indistinguishable from a broken lookup.
+
+Every flow opens with **"Connected in region `$.AwsRegion`"**, so which region served the call
+is audible rather than something you reconstruct from two log groups afterwards. That missing
+signal is exactly how the defect in [FIXES.md](FIXES.md) Fix 16 stayed hidden.
+
+Each failure path also has its **own prompt**, so the caller experience identifies the fault.
+Previously all four experiments ended on one shared "We are experiencing difficulties".
+
+### Experiment 1 — Account-lookup Lambda fails
+`ConnectChaos-Exp1-Lambda` collects a 5-digit account number as DTMF ("Store customer input"),
+then invokes `ConnectChaos-AccountLookup` **directly**. FIS marks that invocation failed
+without running it, so the flow takes the block's Error branch.
+- **Alarm:** `ConnectChaos-Exp1-Lambda-{region}` (threshold `ContactFlowErrorsThreshold`, default `0`)
+- **Prompt:** *"The account lookup service is unavailable. This is experiment one."*
+- A wrong or missing account number does **not** error. The Lambda returns `NOT_FOUND` /
+  `INVALID_INPUT` and the flow branches on it with a `Compare` block, so a mistyped number can
+  never masquerade as an injected fault.
 - **⚠️ 180-second window** — see [Operational constraints](#operational-constraints).
 
 ### Experiment 2 — DynamoDB unreachable
-FIS blocks both Lambda subnets from the DynamoDB endpoint at the network ACL. The flow
-invokes `ConnectChaos-CallLogger` **directly** (a real audit write), so its DynamoDB failure
-takes the flow's Error branch and `ContactFlowErrors` increments on its own path rather than
-only riding the Lambda-Errors alarm.
-- **Alarm:** `ConnectChaos-ContactFlow-Errors-{region}` (threshold `ContactFlowErrorsThreshold`, default `0` — one flow error is enough)
+FIS blocks both Lambda subnets from the DynamoDB endpoint at the network ACL.
+`ConnectChaos-Exp2-DynamoDB` invokes `ConnectChaos-CallLogger` directly (a real audit write),
+so the DynamoDB failure takes the flow's Error branch.
+- **Alarm:** `ConnectChaos-Exp2-DynamoDB-{region}` (threshold `ContactFlowErrorsThreshold`, default `0`)
+- **Prompt:** *"We could not record your call. This is experiment two."*
+- The call logger lives **only** in this flow. Putting it in every flow would make an Exp 2
+  fault raise `ContactFlowErrors` on all four `ContactFlowName` dimensions at once and destroy
+  the attribution this design exists to provide.
 - **No 180 s window** — network-level, so the DynamoDB path is severed for the whole
   experiment. **This is the most reliable experiment to demo with a live call.**
 
 ### Experiment 3 — Lex code-hook latency
-FIS injects a ~31 s startup delay while the function's timeout is 40 s, so the code hook
-runs slow but still returns cleanly. Observed as Lambda **Duration**, not a Lex error.
-- **Alarm:** `ConnectChaos-Lex-CodeHookLatency-{region}` (threshold `LexCodeHookLatencyThresholdMs`, default 7000 ms)
-- **Why not `AWS/Lex RuntimeLambdaErrors`?** Because it is never emitted on Connect's real
-  voice path. `list-metrics` on this bot shows the only dimension set ever produced is
-  `RecognizeUtterance/Speech` (synthetic traffic) — never `StartConversation`. See
-  [FIXES.md](FIXES.md) Fix 7. Duration is the reliable real-call signal and stays cleanly
-  distinct from Experiment 1, where the function never runs (Duration ~0, Errors > 0).
+FIS injects a ~31 s startup delay while the function's timeout is 40 s, so the code hook runs
+slow but still returns cleanly. Observed as Lambda **Duration**, not an error.
+- **Alarm:** `ConnectChaos-Exp3-Latency-{region}` (threshold `LexCodeHookLatencyThresholdMs`, default 7000 ms)
+- **Prompt:** *"The lookup service is taking too long. This is experiment three."*
+- **The only experiment not alarmed on a Connect metric, deliberately.** It is a *latency*
+  fault: the function succeeds, so there may be no flow error at all. A latency threshold is
+  the honest measurement. `ContactFlowErrors` for this flow is on the dashboard as an
+  observation-only panel; if it proves reliable across runs it could become the alarm.
+- **Why not `AWS/Lex RuntimeLambdaErrors`?** It is never emitted for this bot — see
+  [FIXES.md](FIXES.md) Fix 7 and its correction. Duration also stays cleanly distinct from
+  Exp 1, where the function never runs.
 - **⚠️ 180-second window** applies.
 
 ### Experiment 4 — Contact flow failure → no-agent queue
-A DynamoDB chaos flag makes the fulfillment Lambda return `Failed` to Lex. The Chaos Test
-flow's failure path sets **`ConnectChaos-Overflow`** — a queue referenced by no routing
-profile, so no agent can ever receive its contacts — and transfers the contact there. It
-waits indefinitely and `LongestQueueWaitTime` climbs.
-- **Alarm:** `ConnectChaos-QueueWait-{region}` (threshold `QueueWaitSecondsThreshold`, default 60 s)
-- **Why not `MissedCalls`?** That metric requires a call to be *offered to an agent* and go
-  unanswered for 20 s, which is not reproducible without a staffed agent deliberately not
-  answering. A queue with no agents makes the signal deterministic.
-- Not a FIS experiment — you toggle a DynamoDB flag.
+A DynamoDB chaos flag makes the fulfillment Lambda return `Failed` to Lex.
+`ConnectChaos-Exp4-Queue` routes the failure path to **`ConnectChaos-Overflow`** — a queue
+referenced by no routing profile, so no agent can ever receive its contacts — and transfers the
+contact there. It waits indefinitely and `LongestQueueWaitTime` climbs.
+- **Alarm:** `ConnectChaos-Exp4-Queue-{region}` (threshold `QueueWaitSecondsThreshold`, default 60 s)
+- **Prompt:** *"All agents are currently busy. Please hold. This is experiment four."*
+- **Why not `MissedCalls`?** It requires a call to be *offered to an agent* and go unanswered
+  for 20 s, which is not reproducible without a staffed agent deliberately not answering.
+- Not a FIS experiment — you toggle a DynamoDB flag. **Stay on the line ≥ 90 s**, since the
+  signal is accumulated queue wait, not a count.
 
 ---
 
@@ -185,7 +217,7 @@ make verify      STACK=<stack> PRIMARY_REGION=<r1> PAIRED_REGION=<r2> TDG_ID=<td
 | Step | Why CloudFormation cannot do it |
 |---|---|
 | Seed the DynamoDB tables | Data, not infrastructure |
-| **Associate the number with `ConnectChaos-MainIVR`** | The number belongs to the TDG, not the stack, and no CloudFormation resource models the number → flow link |
+| **Associate the number with `ConnectChaos-Menu`** | The number belongs to the TDG, not the stack, and no CloudFormation resource models the number → flow link |
 | Reset traffic to 100/0 | Live routing state |
 
 > **The association is a silent failure if skipped** — every resource reads
@@ -214,8 +246,7 @@ FIS extension layer ARN. All are created or auto-resolved.
 | `ReplicatedLexBotId` / `…AliasId` | | `''` | Paired region only; from the primary stack outputs |
 | `EnableTrafficGenerator` | | `false` | Synthetic metrics — drive alarms without phone calls |
 | `DashboardType` | | `regional` | `regional` or `unified` |
-| `LambdaErrorsThreshold` | | `0` | Exp 1. `0` = one failed invocation trips the alarm; required for single-call testing |
-| `ContactFlowErrorsThreshold` | | `0` | Exp 2. `0` = one flow error trips the alarm. Raise both for production monitoring |
+| `ContactFlowErrorsThreshold` | | `0` | Exps 1 and 2. `0` = one flow error trips the alarm. Raise for production monitoring |
 | `LexCodeHookLatencyThresholdMs` | | `7000` | Exp 3 |
 | `QueueWaitSecondsThreshold` | | `60` | Exp 4 |
 | `FISExperimentDuration` | | `PT5M` | ISO-8601 |

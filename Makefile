@@ -21,7 +21,7 @@ LAMBDA_DIR := lambda
 BUILD_DIR  := build
 TEMPLATE   := cfn/main-template.yaml
 
-LAMBDAS := lex_fulfillment_handler traffic_shift_handler traffic_generator call_logger
+LAMBDAS := lex_fulfillment_handler traffic_shift_handler traffic_generator call_logger account_lookup
 ZIPS    := $(addprefix $(BUILD_DIR)/,$(addsuffix .zip,$(LAMBDAS)))
 
 .PHONY: all package upload deploy clean lint flows help
@@ -73,6 +73,7 @@ upload: package bucket
 	aws s3 cp $(BUILD_DIR)/traffic_shift_handler.zip   s3://$(BUCKET)/connect-chaos/ --region $(REGION)
 	aws s3 cp $(BUILD_DIR)/traffic_generator.zip       s3://$(BUCKET)/connect-chaos/ --region $(REGION)
 	aws s3 cp $(BUILD_DIR)/call_logger.zip             s3://$(BUCKET)/connect-chaos/ --region $(REGION)
+	aws s3 cp $(BUILD_DIR)/account_lookup.zip           s3://$(BUCKET)/connect-chaos/ --region $(REGION)
 
 # One-shot preparation for a region: bucket + zips uploaded.
 bootstrap: upload
@@ -89,7 +90,7 @@ deploy: bootstrap
 	  echo "Required: STACK, REGION, CONNECT_INSTANCE_ARN, CONNECT_INSTANCE_ID, TDG_ID"; \
 	  echo "Optional: PRIMARY_REGION PAIRED_REGION CREATE_VPC ENABLE_AUTO_FAILOVER"; \
 	  echo "          ENABLE_LEX_GR ENABLE_TRAFFIC_GEN DASHBOARD_TYPE"; \
-	  echo "          CONTACT_FLOW_ERRORS_THRESHOLD LAMBDA_ERRORS_THRESHOLD"; \
+	  echo "          CONTACT_FLOW_ERRORS_THRESHOLD"; \
 	  echo "          REPLICATED_LEX_BOT_ID REPLICATED_LEX_BOT_ALIAS_ID"; \
 	  echo "          LAMBDA_SUBNET_A LAMBDA_SUBNET_B LAMBDA_SG  (only if CREATE_VPC=false)"; \
 	  exit 2; \
@@ -117,7 +118,6 @@ deploy: bootstrap
 	    EnableTrafficGenerator=$(or $(ENABLE_TRAFFIC_GEN),true) \
 	    DashboardType=$(or $(DASHBOARD_TYPE),regional) \
 	    ContactFlowErrorsThreshold=$(or $(CONTACT_FLOW_ERRORS_THRESHOLD),0) \
-	    LambdaErrorsThreshold=$(or $(LAMBDA_ERRORS_THRESHOLD),0) \
 	    ReplicatedLexBotId=$(REPLICATED_LEX_BOT_ID) \
 	    ReplicatedLexBotAliasId=$(REPLICATED_LEX_BOT_ALIAS_ID)
 
@@ -193,16 +193,16 @@ post-deploy:
 	aws dynamodb put-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
 	  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'; \
 	echo "    seeded $(STACK)-Customers (account 12345) and $(STACK)-Config (chaos_flag=false)"; \
-	echo "=== 2/3 associating the phone number with ConnectChaos-MainIVR ==="; \
+	echo "=== 2/3 associating the phone number with ConnectChaos-Menu ==="; \
 	FLOW=$$(aws connect list-contact-flows --instance-id $(INSTANCE_ID) \
 	         --region $(PRIMARY_REGION) \
-	         --query "ContactFlowSummaryList[?Name=='ConnectChaos-MainIVR'].Id | [0]" \
+	         --query "ContactFlowSummaryList[?Name=='ConnectChaos-Menu'].Id | [0]" \
 	         --output text); \
 	if [ -z "$$FLOW" ] || [ "$$FLOW" = "None" ]; then \
-	  echo "ERROR: contact flow ConnectChaos-MainIVR not found in $(PRIMARY_REGION)."; \
+	  echo "ERROR: contact flow ConnectChaos-Menu not found in $(PRIMARY_REGION)."; \
 	  echo "       Did the primary stack finish deploying?"; exit 1; \
 	fi; \
-	echo "    flow ConnectChaos-MainIVR = $$FLOW"; \
+	echo "    flow ConnectChaos-Menu = $$FLOW"; \
 	PN="$(PHONE_NUMBER_ID)"; \
 	if [ -z "$$PN" ]; then \
 	  echo "    resolving the number attached to TDG $(TDG_ID)..."; \
@@ -381,7 +381,7 @@ verify:
 	if [ -n "$$B" ]; then echo "  PASS  paired instance has a Lex alias associated"; \
 	else echo "  FAIL  paired instance has NO Lex bot association - its flow cannot reach Lex."; \
 	     echo "        LexBotAssociation is primary-only by design; run 'make post-deploy'"; FAIL=1; fi; \
-	for FN in ConnectChaos-CallLogger LexFulfillmentHandler; do \
+	for FN in ConnectChaos-CallLogger ConnectChaos-AccountLookup LexFulfillmentHandler; do \
 	  ST=$$(aws lambda get-function --function-name $$FN --region $(PAIRED_REGION) \
 	        --query "Configuration.State" --output text 2>/dev/null || echo MISSING); \
 	  if [ "$$ST" != "Active" ]; then echo "  FAIL  $$FN in $(PAIRED_REGION): $$ST"; FAIL=1; \
@@ -396,20 +396,30 @@ verify:
 	     --query "LambdaFunctions[?contains(@,'ConnectChaos-CallLogger')]" --output text 2>/dev/null); \
 	if [ -n "$$L" ]; then echo "  PASS  call logger associated with the paired instance"; \
 	else echo "  FAIL  call logger NOT associated with the paired instance"; FAIL=1; fi; \
-	echo "=== flow content is region-agnostic in BOTH regions ==="; \
+	echo "=== flows: region-agnostic ARNs + region announcement, ALL flows, BOTH regions ==="; \
 	for R in $(PRIMARY_REGION) $(PAIRED_REGION); do \
 	  RID=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $$R \
 	         --query "Stacks[0].Parameters[?ParameterKey=='ConnectInstanceId'].ParameterValue|[0]" --output text); \
-	  FID=$$(aws connect list-contact-flows --instance-id $$RID --region $$R \
-	         --query "ContactFlowSummaryList[?Name=='ConnectChaos-MainIVR'].Id|[0]" --output text 2>/dev/null); \
-	  if [ -z "$$FID" ] || [ "$$FID" = "None" ]; then echo "  FAIL  $$R: ConnectChaos-MainIVR not found"; FAIL=1; continue; fi; \
-	  CT=$$(aws connect describe-contact-flow --instance-id $$RID --contact-flow-id $$FID \
-	        --region $$R --query "ContactFlow.Content" --output text 2>/dev/null); \
-	  case "$$CT" in *'arn:aws:lambda:$$.AwsRegion:'*) echo "  PASS  $$R: Lambda ARN uses \$$.AwsRegion";; \
-	    *) echo "  FAIL  $$R: flow pins the Lambda to one region - the paired region will"; \
-	       echo "        invoke the WRONG region's function and error (FIXES.md Fix 16)"; FAIL=1;; esac; \
-	  case "$$CT" in *'arn:aws:lex:$$.AwsRegion:'*) echo "  PASS  $$R: Lex ARN uses \$$.AwsRegion";; \
-	    *) echo "  FAIL  $$R: flow pins the Lex alias to one region (FIXES.md Fix 8)"; FAIL=1;; esac; \
+	  for FN in ConnectChaos-Menu ConnectChaos-Exp1-Lambda ConnectChaos-Exp2-DynamoDB \
+	            ConnectChaos-Exp3-Latency ConnectChaos-Exp4-Queue; do \
+	    FID=$$(aws connect list-contact-flows --instance-id $$RID --region $$R \
+	           --query "ContactFlowSummaryList[?Name=='$$FN'].Id|[0]" --output text 2>/dev/null); \
+	    if [ -z "$$FID" ] || [ "$$FID" = "None" ]; then \
+	      echo "  FAIL  $$R: flow $$FN not found"; FAIL=1; continue; fi; \
+	    CT=$$(aws connect describe-contact-flow --instance-id $$RID --contact-flow-id $$FID \
+	          --region $$R --query "ContactFlow.Content" --output text 2>/dev/null); \
+	    BAD=""; \
+	    case "$$CT" in *'arn:aws:lambda:'*) \
+	      case "$$CT" in *'arn:aws:lambda:$$.AwsRegion:'*) :;; \
+	        *) BAD="$$BAD Lambda-ARN-pinned(Fix16)";; esac;; esac; \
+	    case "$$CT" in *'arn:aws:lex:'*) \
+	      case "$$CT" in *'arn:aws:lex:$$.AwsRegion:'*) :;; \
+	        *) BAD="$$BAD Lex-ARN-pinned(Fix8)";; esac;; esac; \
+	    case "$$CT" in *'Connected in region $$.AwsRegion'*) :;; \
+	      *) BAD="$$BAD no-region-announcement";; esac; \
+	    if [ -z "$$BAD" ]; then echo "  PASS  $$R/$$FN"; \
+	    else echo "  FAIL  $$R/$$FN:$$BAD"; FAIL=1; fi; \
+	  done; \
 	done; \
 	echo "=== seed data ==="; \
 	C=$$(aws dynamodb get-item --table-name $(STACK)-Customers --region $(PRIMARY_REGION) \
@@ -455,8 +465,8 @@ lint:
 	# primary-region deploys (only populated in paired-region). Ignore them.
 	cfn-lint -i W1030 -- $(TEMPLATE)
 	bash -n scripts/wire-paired-flow.sh
-	python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ['$(LAMBDA_DIR)/lex_fulfillment_handler.py', '$(LAMBDA_DIR)/traffic_shift_handler.py', '$(LAMBDA_DIR)/traffic_generator.py', '$(LAMBDA_DIR)/call_logger.py']]; print('Python: OK')"
-	python3 -c "import json; [json.load(open(f)) for f in ['contact-flows/main-ivr-flow.json', 'contact-flows/chaos-test-flow.json']]; print('JSON: OK')"
+	python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ['$(LAMBDA_DIR)/lex_fulfillment_handler.py', '$(LAMBDA_DIR)/traffic_shift_handler.py', '$(LAMBDA_DIR)/traffic_generator.py', '$(LAMBDA_DIR)/call_logger.py', '$(LAMBDA_DIR)/account_lookup.py']]; print('Python: OK')"
+	python3 -c "import json,glob; [json.load(open(f)) for f in sorted(glob.glob('contact-flows/*.json'))]; print('JSON: OK')"
 	# The reference flows are GENERATED from the template. Fail if they have drifted,
 	# rather than shipping reference files that contradict what is deployed.
 	python3 scripts/extract-flows.py --check

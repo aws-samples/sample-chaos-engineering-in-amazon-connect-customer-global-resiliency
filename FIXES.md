@@ -907,3 +907,90 @@ Consequences worth internalising:
   mechanism even though the original incident itself remains unconfirmed.
 - If you test in a shared account, run `make verify` immediately before each call. Resources can
   vanish between a passing preflight and a test.
+
+---
+
+## Fix 18 — Every experiment produced the same prompt and shared metrics
+
+**Symptom:** during live testing, Experiment 1 and Experiment 2 were audibly identical — both
+ended on *"We are experiencing difficulties. Please try again later."* — because the flow had a
+single `error-msg` block that every error branch routed to. There was no way to tell from the
+call which fault had fired. Worse, Exp 1 alarmed on `AWS/Lambda Errors` and Exp 3 on
+`AWS/Lambda Duration` for the **same function**, so the two experiments shared a namespace and
+a dimension set.
+
+**The constraint that shaped the fix.** `AWS/Connect` publishes exactly one metric meaning "a
+flow failed": `ContactFlowErrors`. There is no per-block metric and no code-hook latency
+metric. Measured against the live instance, only ten `AWS/Connect` metrics have ever been
+emitted for it at all. So four distinct Connect *metric names* are not available.
+
+But `ContactFlowErrors` is dimensioned by `ContactFlowName`. Giving each experiment **its own
+flow** converts that single metric into four independent signals — same metric, disjoint
+dimensions, no metric math.
+
+**Fix:**
+
+| Exp | DTMF | Attributing metric | Namespace |
+|---|:---:|---|---|
+| 1 | `1` | `ContactFlowErrors{ContactFlowName=ConnectChaos-Exp1-Lambda}` | AWS/Connect |
+| 2 | `2` | `ContactFlowErrors{ContactFlowName=ConnectChaos-Exp2-DynamoDB}` | AWS/Connect |
+| 3 | `3` | `Duration` (Maximum) on `LexFulfillmentHandler` | AWS/Lambda |
+| 4 | `4` | `LongestQueueWaitTime{QueueName=ConnectChaos-Overflow}` | AWS/Connect |
+
+Three of four are now Connect-native, up from two, and no two experiments share a dimension
+set. Alarms were renamed to `ConnectChaos-Exp{1..4}-*-<region>` so the alarm identifies the
+experiment.
+
+Supporting changes:
+
+- **`ConnectChaos-Menu`** is the new entry flow and the only one the phone number points at. It
+  announces the region, then a `GetParticipantInput` with `StoreInput=False` — whose *result*
+  is the digit and which supports `Equals` conditions on a single character — transfers to one
+  experiment flow per digit.
+- **Exp 1 moved off the Lex code hook onto a new direct-invoke Lambda,
+  `ConnectChaos-AccountLookup`**, preceded by a `GetParticipantInput` with `StoreInput=True`
+  that collects the account number as DTMF. FIS now targets that function, so the failure lands
+  on an `InvokeLambdaFunction` **Error branch** — which is what `ContactFlowErrors` counts.
+- **Every flow opens with "Connected in region `$.AwsRegion`".** Which region served a call is
+  now audible. This is a direct response to Fix 16: that defect survived because proving the
+  serving region required cross-referencing two log groups after every call, so nobody did it.
+- **Each failure path has its own prompt**, naming the experiment.
+- **Exp 2's metric math is gone.** It summed `ContactFlowErrors` across `ConnectChaos-MainIVR`
+  and `ConnectChaos-ChaosTest`, and `list-metrics` showed the second dimension set was **never
+  emitted** — half the expression had always been dead.
+- `LambdaErrorsThreshold`, added only one fix earlier, is now unused and was removed along with
+  the `make deploy` override that passed it. Leaving the override would have failed every
+  deploy with "parameter does not exist".
+
+**Deliberate design decisions, so they are not "fixed" later:**
+
+**"Not found" is not an error.** `account_lookup.py` returns `FOUND` / `NOT_FOUND` /
+`INVALID_INPUT` and the flow branches with a `Compare` block. Raising on a bad account number
+would make a caller's typo indistinguishable from an injected fault and falsify the
+experiment's central claim. Only genuine invocation and DynamoDB failures propagate.
+
+**A DTMF timeout does not error either.** "Store customer input" takes the *Success* branch with
+the stored value set to the literal string `Timeout`
+([docs](https://docs.aws.amazon.com/connect/latest/adminguide/store-customer-input.html)). The
+Lambda rejects that sentinel explicitly; otherwise a silent caller would look like a
+`NOT_FOUND`.
+
+**The call logger stays in exactly one flow.** If every flow invoked it, an Exp 2 fault would
+raise `ContactFlowErrors` on all four `ContactFlowName` dimensions at once and destroy the
+attribution this redesign exists to create.
+
+**Exp 3 keeps a Lambda metric on purpose.** It is a *latency* fault: the function returns
+cleanly at ~31 s with `Errors=0` (Fix 7), so there may be no flow error to count. Whether Lex's
+30 s code-hook timeout trips the block's error branch is **unverified**. A latency threshold is
+the honest measurement for a latency fault; `ContactFlowErrors` for that flow is on the
+dashboard as observation-only, and could become the alarm if it proves reliable.
+
+**Error types are per-action and not interchangeable.** The generator asserts this because Fix 2
+was an `InvalidContactFlowException` from getting it wrong: `Compare` accepts only
+`NoMatchingCondition`; `InvokeLambdaFunction` only `NoMatchingError` and supports no conditions
+at all; `GetParticipantInput` with `StoreInput=True` must not declare `NoMatchingCondition` and
+*must* supply `InputValidation`.
+
+**Cost of the design:** five flows instead of two, all ACGR-replicated, all needing
+`$.AwsRegion` verification. `make verify` now checks all five in both regions — ARNs and the
+region announcement — which is the check that would have caught Fix 16 without spending a call.

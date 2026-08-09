@@ -1,0 +1,77 @@
+{
+  "Version": "2019-10-30",
+  "StartAction": "entry",
+  "Actions": [
+    {
+      "Identifier": "entry",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Connected in region $.AwsRegion. Experiment two, call audit logging."
+      },
+      "Transitions": {
+        "NextAction": "log-call",
+        "Errors": [
+          {
+            "NextAction": "log-call",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "log-call",
+      "Type": "InvokeLambdaFunction",
+      "Parameters": {
+        "LambdaFunctionARN": "arn:aws:lambda:$.AwsRegion:ACCOUNT_ID:function:ConnectChaos-CallLogger",
+        "InvocationTimeLimitSeconds": "8"
+      },
+      "Transitions": {
+        "NextAction": "logged",
+        "Errors": [
+          {
+            "NextAction": "log-down",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "logged",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Your call has been recorded for quality purposes. Thank you."
+      },
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "log-down",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "We could not record your call. This is experiment two."
+      },
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "disconnect",
+      "Type": "DisconnectParticipant",
+      "Parameters": {},
+      "Transitions": {}
+    }
+  ]
+}

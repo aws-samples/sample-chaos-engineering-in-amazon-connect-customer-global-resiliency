@@ -112,15 +112,6 @@ Parameters:
       x86_64 extension for this region automatically.
     Default: /aws/service/fis/lambda-extension/AWS-FIS-extension-x86_64/1.x.x
 
-  LambdaErrorsThreshold:
-    Type: Number
-    Default: 0
-    Description: >-
-      (Exp 1) Alarm threshold for AWS/Lambda Errors, compared with GreaterThanThreshold.
-      Default 0 means a SINGLE failed invocation trips the alarm. Previously this alarm had
-      a hardcoded threshold of 5 and no parameter at all, so Experiment 1 could not be
-      demonstrated with one test call.
-
   ContactFlowErrorsThreshold:
     Type: Number
     Default: 0
@@ -403,42 +394,76 @@ Resources:
       IntegrationType: LEX_BOT
       IntegrationArn: !GetAtt ConnectChaosBotAlias.Arn
 
-  MainIVRFlow:
+  MenuFlow:
     Type: AWS::Connect::ContactFlow
     Condition: IsPrimaryRegion
     DependsOn:
       - LexBotAssociation
       - CallLoggerAssociation
+      - AccountLookupAssociation
     Properties:
       InstanceArn: !Ref ConnectInstanceArn
-      Name: ConnectChaos-MainIVR
+      Name: ConnectChaos-Menu
       Type: CONTACT_FLOW
-      Description: Main IVR with Lex bot — ACGR auto-replicates to paired region
-      # Flow path: entry → log-call (direct Lambda invoke) → lex-input → success/error.
-      # The log-call "Invoke AWS Lambda function" block persists the inbound contact to
-      # DynamoDB (real audit/interaction-history write) and is what makes Experiment 2
-      # produce AWS/Connect ContactFlowErrors: when FIS severs DynamoDB connectivity,
-      # CallLoggerHandler's put_item raises, Connect takes this block's Error branch
-      # (→ error-msg), and ContactFlowErrors increments. Under normal conditions the
-      # write succeeds in a few ms and the call proceeds to the Lex block unchanged.
+      Description: "DTMF menu and region announcement. The phone number points HERE."
       Content: !Sub |
-        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Welcome to customer service. I can help you look up your account or check an order."},"Transitions":{"NextAction":"log-call","Errors":[{"NextAction":"error-msg","ErrorType":"NoMatchingError"}]}},{"Identifier":"log-call","Type":"InvokeLambdaFunction","Parameters":{"LambdaFunctionARN":"arn:aws:lambda:$.AwsRegion:${AWS::AccountId}:function:${CallLoggerHandler}","InvocationTimeLimitSeconds":"8"},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"error-msg","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"Text":"How can I help you today? You can ask to look up your account or check an order.","LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}"}},"Transitions":{"NextAction":"success-msg","Conditions":[{"NextAction":"success-msg","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"success-msg","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"error-msg","ErrorType":"NoMatchingError"},{"NextAction":"error-msg","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"success-msg","Type":"MessageParticipant","Parameters":{"Text":"I found your information. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"error-msg","Type":"MessageParticipant","Parameters":{"Text":"We are experiencing difficulties. Please try again later."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
-
-  ChaosTestFlow:
+        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Welcome to the chaos engineering sample."},"Transitions":{"NextAction":"menu","Errors":[{"NextAction":"menu","ErrorType":"NoMatchingError"}]}},{"Identifier":"menu","Type":"GetParticipantInput","Parameters":{"Text":"Press 1 for the account lookup experiment. Press 2 for the call audit experiment. Press 3 for the speech latency experiment. Press 4 for the queue overflow experiment.","InputTimeLimitSeconds":"10","StoreInput":"False"},"Transitions":{"NextAction":"invalid","Conditions":[{"NextAction":"to-exp1","Condition":{"Operator":"Equals","Operands":["1"]}},{"NextAction":"to-exp2","Condition":{"Operator":"Equals","Operands":["2"]}},{"NextAction":"to-exp3","Condition":{"Operator":"Equals","Operands":["3"]}},{"NextAction":"to-exp4","Condition":{"Operator":"Equals","Operands":["4"]}}],"Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingCondition"},{"NextAction":"invalid","ErrorType":"InputTimeLimitExceeded"},{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"to-exp1","Type":"TransferToFlow","Parameters":{"ContactFlowId":"${Exp1Flow}"},"Transitions":{"NextAction":"invalid","Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"to-exp2","Type":"TransferToFlow","Parameters":{"ContactFlowId":"${Exp2Flow}"},"Transitions":{"NextAction":"invalid","Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"to-exp3","Type":"TransferToFlow","Parameters":{"ContactFlowId":"${Exp3Flow}"},"Transitions":{"NextAction":"invalid","Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"to-exp4","Type":"TransferToFlow","Parameters":{"ContactFlowId":"${Exp4Flow}"},"Transitions":{"NextAction":"invalid","Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"invalid","Type":"MessageParticipant","Parameters":{"Text":"No valid selection was received. Goodbye."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+  Exp1Flow:
     Type: AWS::Connect::ContactFlow
     Condition: IsPrimaryRegion
-    DependsOn: LexBotAssociation
+    DependsOn:
+      - LexBotAssociation
+      - CallLoggerAssociation
+      - AccountLookupAssociation
     Properties:
       InstanceArn: !Ref ConnectInstanceArn
-      Name: ConnectChaos-ChaosTest
+      Name: ConnectChaos-Exp1-Lambda
       Type: CONTACT_FLOW
-      Description: >-
-        Chaos test flow (Exp 4). The failure path sets the no-agent overflow queue and
-        transfers the contact there, so unanswered contacts accumulate
-        LongestQueueWaitTime - the Exp 4 alarm metric.
+      Description: "Exp 1: DTMF account lookup; FIS errors the InvokeLambdaFunction block."
       Content: !Sub |
-        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Welcome. Let me look up your information."},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"error-path","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"Text":"How can I help you today? You can ask to look up your account or check an order.","LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}"}},"Transitions":{"NextAction":"success-path","Conditions":[{"NextAction":"success-path","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"success-path","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"error-path","ErrorType":"NoMatchingError"},{"NextAction":"error-path","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"success-path","Type":"MessageParticipant","Parameters":{"Text":"Found your info. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"error-path","Type":"MessageParticipant","Parameters":{"Text":"We are experiencing technical difficulties. Please hold for the next available agent."},"Transitions":{"NextAction":"set-overflow-queue","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"set-overflow-queue","Type":"UpdateContactTargetQueue","Parameters":{"QueueId":"${ChaosOverflowQueue.QueueArn}"},"Transitions":{"NextAction":"transfer-overflow","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"transfer-overflow","Type":"TransferContactToQueue","Parameters":{},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"QueueAtCapacity"},{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
-
+        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Experiment one, account lookup."},"Transitions":{"NextAction":"ask","Errors":[{"NextAction":"ask","ErrorType":"NoMatchingError"}]}},{"Identifier":"ask","Type":"GetParticipantInput","Parameters":{"Text":"Please enter your five digit account number, followed by the pound key.","InputTimeLimitSeconds":"10","StoreInput":"True","InputValidation":{"CustomValidation":{"MaximumLength":"5"}},"DTMFConfiguration":{"InterdigitTimeLimitSeconds":"5"}},"Transitions":{"NextAction":"lookup","Errors":[{"NextAction":"no-input","ErrorType":"InputTimeLimitExceeded"},{"NextAction":"lookup-down","ErrorType":"NoMatchingError"}]}},{"Identifier":"lookup","Type":"InvokeLambdaFunction","Parameters":{"LambdaFunctionARN":"arn:aws:lambda:$.AwsRegion:${AWS::AccountId}:function:${AccountLookupHandler}","InvocationTimeLimitSeconds":"8","LambdaInvocationAttributes":{"AccountId":"$.StoredCustomerInput"},"ResponseValidation":{"ResponseType":"STRING_MAP"}},"Transitions":{"NextAction":"check","Errors":[{"NextAction":"lookup-down","ErrorType":"NoMatchingError"}]}},{"Identifier":"check","Type":"Compare","Parameters":{"ComparisonValue":"$.External.status"},"Transitions":{"NextAction":"not-found","Conditions":[{"NextAction":"found","Condition":{"Operator":"Equals","Operands":["FOUND"]}},{"NextAction":"not-found","Condition":{"Operator":"Equals","Operands":["NOT_FOUND"]}},{"NextAction":"no-input","Condition":{"Operator":"Equals","Operands":["INVALID_INPUT"]}}],"Errors":[{"NextAction":"not-found","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"found","Type":"MessageParticipant","Parameters":{"Text":"Welcome back, $.External.customer_name. Your account is in good standing."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"not-found","Type":"MessageParticipant","Parameters":{"Text":"That account number was not found. Please check it and call again."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"no-input","Type":"MessageParticipant","Parameters":{"Text":"No account number was received."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"lookup-down","Type":"MessageParticipant","Parameters":{"Text":"The account lookup service is unavailable. This is experiment one."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+  Exp2Flow:
+    Type: AWS::Connect::ContactFlow
+    Condition: IsPrimaryRegion
+    DependsOn:
+      - LexBotAssociation
+      - CallLoggerAssociation
+      - AccountLookupAssociation
+    Properties:
+      InstanceArn: !Ref ConnectInstanceArn
+      Name: ConnectChaos-Exp2-DynamoDB
+      Type: CONTACT_FLOW
+      Description: "Exp 2: call audit write; FIS severs DynamoDB so the invoke fails."
+      Content: !Sub |
+        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Experiment two, call audit logging."},"Transitions":{"NextAction":"log-call","Errors":[{"NextAction":"log-call","ErrorType":"NoMatchingError"}]}},{"Identifier":"log-call","Type":"InvokeLambdaFunction","Parameters":{"LambdaFunctionARN":"arn:aws:lambda:$.AwsRegion:${AWS::AccountId}:function:${CallLoggerHandler}","InvocationTimeLimitSeconds":"8"},"Transitions":{"NextAction":"logged","Errors":[{"NextAction":"log-down","ErrorType":"NoMatchingError"}]}},{"Identifier":"logged","Type":"MessageParticipant","Parameters":{"Text":"Your call has been recorded for quality purposes. Thank you."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"log-down","Type":"MessageParticipant","Parameters":{"Text":"We could not record your call. This is experiment two."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+  Exp3Flow:
+    Type: AWS::Connect::ContactFlow
+    Condition: IsPrimaryRegion
+    DependsOn:
+      - LexBotAssociation
+      - CallLoggerAssociation
+      - AccountLookupAssociation
+    Properties:
+      InstanceArn: !Ref ConnectInstanceArn
+      Name: ConnectChaos-Exp3-Latency
+      Type: CONTACT_FLOW
+      Description: "Exp 3: Lex code hook delayed ~31s."
+      Content: !Sub |
+        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Experiment three, speech latency."},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"lex-input","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"Text":"How can I help you today? You can ask to look up your account or check an order.","LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}"}},"Transitions":{"NextAction":"ok","Conditions":[{"NextAction":"ok","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"ok","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"lex-slow","ErrorType":"NoMatchingError"},{"NextAction":"lex-slow","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"ok","Type":"MessageParticipant","Parameters":{"Text":"I found your information. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-slow","Type":"MessageParticipant","Parameters":{"Text":"The lookup service is taking too long. This is experiment three."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
+  Exp4Flow:
+    Type: AWS::Connect::ContactFlow
+    Condition: IsPrimaryRegion
+    DependsOn:
+      - LexBotAssociation
+      - CallLoggerAssociation
+      - AccountLookupAssociation
+    Properties:
+      InstanceArn: !Ref ConnectInstanceArn
+      Name: ConnectChaos-Exp4-Queue
+      Type: CONTACT_FLOW
+      Description: "Exp 4: chaos flag routes the contact to a no-agent queue."
+      Content: !Sub |
+        {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Experiment four, queue overflow."},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"lex-input","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"Text":"How can I help you today? You can ask to look up your account or check an order.","LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}"}},"Transitions":{"NextAction":"ok","Conditions":[{"NextAction":"ok","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"ok","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"overflow-msg","ErrorType":"NoMatchingError"},{"NextAction":"overflow-msg","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"ok","Type":"MessageParticipant","Parameters":{"Text":"I found your information. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"overflow-msg","Type":"MessageParticipant","Parameters":{"Text":"All agents are currently busy. Please hold. This is experiment four."},"Transitions":{"NextAction":"set-overflow-queue","Errors":[{"NextAction":"set-overflow-queue","ErrorType":"NoMatchingError"}]}},{"Identifier":"set-overflow-queue","Type":"UpdateContactTargetQueue","Parameters":{"QueueId":"${ChaosOverflowQueue.QueueArn}"},"Transitions":{"NextAction":"transfer-overflow","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"transfer-overflow","Type":"TransferContactToQueue","Parameters":{},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"QueueAtCapacity"},{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
   # ═══════════════════════════════════════════════════════════
   # OPTIONAL SELF-CONTAINED VPC  (Condition: MakeVpc)
   # ═══════════════════════════════════════════════════════════
@@ -704,6 +729,32 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}-CallLog'
 
+  # Least privilege: read-only on the Customers table. It cannot touch the call log or the
+  # chaos config, so an Experiment 1 fault cannot have side effects on the other experiments.
+  AccountLookupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'ConnectChaos-AccountLookup-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DynamoDBRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem]
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}-Customers'
+
   FISExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -722,7 +773,13 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: [lambda:GetFunction, lambda:GetFunctionConfiguration]
-                Resource: !GetAtt LexFulfillmentHandler.Arn
+                Resource:
+                  # Exp 3 targets the Lex code hook (add-delay).
+                  - !GetAtt LexFulfillmentHandler.Arn
+                  # Exp 1 targets the DTMF account lookup (invocation-error), so the flow's
+                  # InvokeLambdaFunction block errors and ContactFlowErrors attributes the
+                  # fault to Exp 1's own flow. See FIXES.md Fix 18.
+                  - !GetAtt AccountLookupHandler.Arn
               - Effect: Allow
                 Action: tag:GetResources
                 Resource: '*'
@@ -954,7 +1011,7 @@ Resources:
       SourceAccount: !Ref 'AWS::AccountId'
 
   # ── Call-logger Lambda (real use case + Experiment 2 → ContactFlowErrors) ──
-  # Real use case: the contact flow invokes this function DIRECTLY (see MainIVRFlow
+  # Real use case: the contact flow invokes this function DIRECTLY (see Exp2Flow
   # log-call block) at the very start of every call to persist the inbound contact
   # to DynamoDB — the audit/interaction-history write that a real contact center does
   # before servicing the caller.
@@ -993,6 +1050,68 @@ Resources:
       Tags:
         - Key: FISExperiment
           Value: ConnectChaos
+
+  # ── DTMF account-lookup Lambda (real use case + Experiment 1 → ContactFlowErrors) ──
+  # Invoked DIRECTLY by the Exp 1 flow, right after a "Store customer input" block collects
+  # the account number as DTMF. Experiment 1 applies aws:lambda:invocation-error to THIS
+  # function, so the invocation fails without running, Connect takes the block's Error
+  # branch, and ContactFlowErrors increments for the Exp 1 flow specifically.
+  #
+  # Why this exists at all: Experiment 1 used to alarm on AWS/Lambda Errors for the Lex code
+  # hook. That works, but it is not a Connect-native signal and it shares the Lambda
+  # namespace with Exp 3, so the two could not be told apart by metric alone. Moving the
+  # fault onto a direct-invoke block gives Exp 1 its own ContactFlowName dimension.
+  # See FIXES.md Fix 18.
+  #
+  # FunctionName is pinned and identical in both regions, which is what makes the flow's
+  # $.AwsRegion Lambda ARN valid (ACGR requirement). Do not let CloudFormation auto-name it.
+  AccountLookupHandler:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ConnectChaos-AccountLookup
+      Runtime: python3.13
+      Handler: account_lookup.lambda_handler
+      Role: !GetAtt AccountLookupRole.Arn
+      # Connect's InvokeLambdaFunction hard limit is 8s; stay under it.
+      Timeout: 8
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: connect-chaos/account_lookup.zip
+      Layers:
+        # Required for Experiment 1: the FIS extension is what applies invocation-error.
+        - !Ref FISExtensionLayerArn
+      Environment:
+        Variables:
+          CUSTOMER_TABLE_NAME: !Sub '${AWS::StackName}-Customers'
+          AWS_FIS_CONFIGURATION_LOCATION: !Sub '${FISConfigBucket.Arn}/FisConfigs/'
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/aws-fis/bootstrap
+      VpcConfig:
+        SubnetIds:
+          - !If [MakeVpc, !Ref ChaosSubnetA, !Ref LambdaSubnetIdA]
+          - !If [MakeVpc, !Ref ChaosSubnetB, !Ref LambdaSubnetIdB]
+        SecurityGroupIds:
+          - !If [MakeVpc, !Ref ChaosLambdaSecurityGroup, !Ref LambdaSecurityGroupId]
+      Tags:
+        - Key: FISExperiment
+          Value: ConnectChaos
+
+  AccountLookupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AccountLookupHandler
+      Action: lambda:InvokeFunction
+      Principal: connect.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Ref ConnectInstanceArn
+
+  # Created in BOTH regions so the paired region's replicated flow can invoke its own copy.
+  AccountLookupAssociation:
+    Type: AWS::Connect::IntegrationAssociation
+    Properties:
+      InstanceId: !Ref ConnectInstanceArn
+      IntegrationType: LAMBDA_FUNCTION
+      IntegrationArn: !GetAtt AccountLookupHandler.Arn
 
   # Amazon Connect → Lambda invocation permission for the direct-invoke call logger.
   CallLoggerPermission:
@@ -1040,91 +1159,60 @@ Resources:
           PAIRED_REGION: !Ref PairedRegion
 
   # ── CloudWatch Alarms ──
-  AlarmLambdaErrors:
+  AlarmExp1Lambda:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub 'ConnectChaos-Lambda-Errors-${AWS::Region}'
-      AlarmDescription: 'Exp 1: Lambda invocation errors'
-      Namespace: AWS/Lambda
-      MetricName: Errors
+      AlarmName: !Sub 'ConnectChaos-Exp1-Lambda-${AWS::Region}'
+      AlarmDescription: >-
+        Exp 1 (DTMF account lookup, aws:lambda:invocation-error). Fires on AWS/Connect ContactFlowErrors for ConnectChaos-Exp1-Lambda ONLY. Because
+        ContactFlowErrors is dimensioned by ContactFlowName, giving each experiment its own
+        flow turns Connect's single "a flow failed" metric into independent per-experiment
+        signals - no metric math, no overlap with any other experiment. See FIXES.md Fix 18.
+      Namespace: AWS/Connect
+      MetricName: ContactFlowErrors
       Dimensions:
-        - Name: FunctionName
-          Value: !Ref LexFulfillmentHandler
+        - Name: InstanceId
+          Value: !Ref ConnectInstanceId
+        - Name: MetricGroup
+          Value: ContactFlow
+        - Name: ContactFlowName
+          Value: ConnectChaos-Exp1-Lambda
       Statistic: Sum
       Period: 60
-      EvaluationPeriods: 1
-      Threshold: !Ref LambdaErrorsThreshold
-      ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
-
-  AlarmContactFlowErrors:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub 'ConnectChaos-ContactFlow-Errors-${AWS::Region}'
-      AlarmDescription: 'Exp 2: ContactFlowErrors from DDB disruption (sums across both workshop flows)'
-      Metrics:
-        # Connect publishes ContactFlowErrors with dimensions [InstanceId, MetricGroup, ContactFlowName].
-        # An alarm without ContactFlowName matches no datapoints, so we sum across our two
-        # known-named flows using a metric math expression.
-        - Id: m1
-          MetricStat:
-            Metric:
-              Namespace: AWS/Connect
-              MetricName: ContactFlowErrors
-              Dimensions:
-                - Name: InstanceId
-                  Value: !Ref ConnectInstanceId
-                - Name: MetricGroup
-                  Value: ContactFlow
-                - Name: ContactFlowName
-                  Value: ConnectChaos-MainIVR
-            Period: 60
-            Stat: Sum
-          ReturnData: false
-        - Id: m2
-          MetricStat:
-            Metric:
-              Namespace: AWS/Connect
-              MetricName: ContactFlowErrors
-              Dimensions:
-                - Name: InstanceId
-                  Value: !Ref ConnectInstanceId
-                - Name: MetricGroup
-                  Value: ContactFlow
-                - Name: ContactFlowName
-                  Value: ConnectChaos-ChaosTest
-            Period: 60
-            Stat: Sum
-          ReturnData: false
-        - Id: total
-          Expression: 'SUM([m1, m2])'
-          Label: TotalContactFlowErrors
-          ReturnData: true
       EvaluationPeriods: 1
       Threshold: !Ref ContactFlowErrorsThreshold
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
-  # Exp 3: Lex code-hook latency/timeout.
-  #
-  # FIX 7: the original design alarmed on AWS/Lex RuntimeLambdaErrors, but that metric
-  # is NOT produced for real Amazon Connect voice traffic. Connect voice invokes the bot
-  # through the bidirectional streaming API (Operation=StartConversation); across repeated
-  # real calls, a slow/timed-out fulfillment code hook on that path emits NO
-  # RuntimeLambdaErrors under any dimension set (that metric only appears for the
-  # request/response RecognizeUtterance/RecognizeText operations used by the CLI and the
-  # synthetic generator). See FIXES.md (Fix 7) for the investigation.
-  #
-  # Reliable, real-voice signal instead: alarm on the fulfillment Lambda's DURATION.
-  # Experiment 3 injects a ~31s startup delay (> Lex's code-hook timeout, < the Lambda's
-  # 40s timeout), so LexFulfillmentHandler's Duration spikes to ~31s on every call while
-  # the function still returns cleanly (0 Lambda errors). That makes Exp 3 both reliable
-  # on real telephony AND cleanly distinct from Exp 1 (invocation-error → the function
-  # never runs, Duration ~0, Errors > 0).
-  AlarmLexRuntimeErrors:
+  AlarmExp2DynamoDB:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub 'ConnectChaos-Lex-CodeHookLatency-${AWS::Region}'
+      AlarmName: !Sub 'ConnectChaos-Exp2-DynamoDB-${AWS::Region}'
+      AlarmDescription: >-
+        Exp 2 (call audit write, aws:network:disrupt-connectivity). Fires on AWS/Connect ContactFlowErrors for ConnectChaos-Exp2-DynamoDB ONLY. Because
+        ContactFlowErrors is dimensioned by ContactFlowName, giving each experiment its own
+        flow turns Connect's single "a flow failed" metric into independent per-experiment
+        signals - no metric math, no overlap with any other experiment. See FIXES.md Fix 18.
+      Namespace: AWS/Connect
+      MetricName: ContactFlowErrors
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref ConnectInstanceId
+        - Name: MetricGroup
+          Value: ContactFlow
+        - Name: ContactFlowName
+          Value: ConnectChaos-Exp2-DynamoDB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: !Ref ContactFlowErrorsThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  AlarmExp3Latency:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ConnectChaos-Exp3-Latency-${AWS::Region}'
       AlarmDescription: 'Exp 3: Lex fulfillment code-hook latency (FIS invocation-add-delay)'
       Namespace: AWS/Lambda
       MetricName: Duration
@@ -1140,10 +1228,10 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
-  AlarmQueueWait:
+  AlarmExp4Queue:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub 'ConnectChaos-QueueWait-${AWS::Region}'
+      AlarmName: !Sub 'ConnectChaos-Exp4-Queue-${AWS::Region}'
       AlarmDescription: >-
         Exp 4: contacts backing up in the no-agent overflow queue. Fires when the longest
         wait in ConnectChaos-Overflow exceeds the threshold (seconds).
@@ -1173,14 +1261,14 @@ Resources:
     # the composite alarm races its members and create fails with
     # "Could not save the composite alarm as alarms [...] in the alarm rule do not exist".
     DependsOn:
-      - AlarmLambdaErrors
-      - AlarmContactFlowErrors
-      - AlarmLexRuntimeErrors
-      - AlarmQueueWait
+      - AlarmExp1Lambda
+      - AlarmExp2DynamoDB
+      - AlarmExp3Latency
+      - AlarmExp4Queue
     Properties:
       AlarmName: !Sub 'ConnectChaos-Composite-${AWS::Region}'
       AlarmDescription: ANY component alarm triggers ACGR failover
-      AlarmRule: !Sub 'ALARM("ConnectChaos-Lambda-Errors-${AWS::Region}") OR ALARM("ConnectChaos-ContactFlow-Errors-${AWS::Region}") OR ALARM("ConnectChaos-Lex-CodeHookLatency-${AWS::Region}") OR ALARM("ConnectChaos-QueueWait-${AWS::Region}")'
+      AlarmRule: !Sub 'ALARM("ConnectChaos-Exp1-Lambda-${AWS::Region}") OR ALARM("ConnectChaos-Exp2-DynamoDB-${AWS::Region}") OR ALARM("ConnectChaos-Exp3-Latency-${AWS::Region}") OR ALARM("ConnectChaos-Exp4-Queue-${AWS::Region}")'
       ActionsEnabled: true
       AlarmActions:
         - !Ref AlarmNotificationTopic
@@ -1204,12 +1292,16 @@ Resources:
       RoleArn: !GetAtt FISExecutionRole.Arn
       StopConditions:
         - Source: aws:cloudwatch:alarm
-          Value: !GetAtt AlarmLambdaErrors.Arn
+          Value: !GetAtt AlarmExp1Lambda.Arn
       Targets:
         LambdaFunction:
           ResourceType: aws:lambda:function
           ResourceArns:
-            - !GetAtt LexFulfillmentHandler.Arn
+            # The DTMF account-lookup function, invoked DIRECTLY by the Exp 1 flow. Erroring
+            # it makes the flow take its InvokeLambdaFunction Error branch, which is what
+            # AWS/Connect ContactFlowErrors counts. Targeting the Lex code hook instead would
+            # only raise AWS/Lambda Errors, which Exp 3 also touches. See FIXES.md Fix 18.
+            - !GetAtt AccountLookupHandler.Arn
           SelectionMode: ALL
       Actions:
         InjectError:
@@ -1229,7 +1321,7 @@ Resources:
       RoleArn: !GetAtt FISExecutionRole.Arn
       StopConditions:
         - Source: aws:cloudwatch:alarm
-          Value: !GetAtt AlarmContactFlowErrors.Arn
+          Value: !GetAtt AlarmExp2DynamoDB.Arn
       Targets:
         Subnets:
           ResourceType: aws:ec2:subnet
@@ -1263,7 +1355,7 @@ Resources:
       RoleArn: !GetAtt FISExecutionRole.Arn
       StopConditions:
         - Source: aws:cloudwatch:alarm
-          Value: !GetAtt AlarmLexRuntimeErrors.Arn
+          Value: !GetAtt AlarmExp3Latency.Arn
       Targets:
         LambdaFunction:
           ResourceType: aws:lambda:function
@@ -1319,7 +1411,7 @@ Resources:
       DashboardName: !Sub 'ConnectChaos-${AWS::Region}'
       DashboardBody: !Sub
         - |
-          {"widgets":[{"type":"metric","width":6,"height":6,"x":0,"y":0,"properties":{"title":"Exp 1: Lambda Errors","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":6,"y":0,"properties":{"title":"Exp 2: ContactFlowErrors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-MainIVR",{"stat":"Sum"}],["...","ConnectChaos-ChaosTest"]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":12,"y":0,"properties":{"title":"Exp 3: Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":0,"y":6,"properties":{"title":"Exp 4: Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}}]}
+          {"widgets":[{"type":"metric","width":6,"height":6,"x":0,"y":0,"properties":{"title":"Exp 1: ContactFlowErrors (Exp1-Lambda flow)","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":6,"y":0,"properties":{"title":"Exp 2: ContactFlowErrors (Exp2-DynamoDB flow)","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":12,"y":0,"properties":{"title":"Exp 3: Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":18,"y":0,"properties":{"title":"Exp 4: Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":12,"height":6,"x":0,"y":6,"properties":{"title":"Exp 3 corroboration: ContactFlowErrors (Exp3-Latency flow) - OBSERVATION ONLY, not alarmed","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp3-Latency",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":12,"height":6,"x":12,"y":6,"properties":{"title":"Cross-cutting: AWS/Lambda Errors (all functions) - NOT alarmed, see FIXES.md Fix 18","metrics":[["AWS/Lambda","Errors","FunctionName","ConnectChaos-AccountLookup",{"stat":"Sum"}],["AWS/Lambda","Errors","FunctionName","ConnectChaos-CallLogger",{"stat":"Sum"}],["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}}]}
         - BotId: !If [CreateLexLocally, !GetAtt ConnectChaosBot.Id, !Ref ReplicatedLexBotId]
           BotAliasId: !If [CreateLexLocally, !GetAtt ConnectChaosBotAlias.BotAliasId, !Ref ReplicatedLexBotAliasId]
 
@@ -1330,7 +1422,7 @@ Resources:
       DashboardName: ConnectChaos-Unified
       DashboardBody: !Sub
         - |
-          {"widgets":[{"type":"text","width":24,"height":1,"x":0,"y":0,"properties":{"markdown":"## Primary Region (${PrimaryRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":1,"properties":{"title":"Lambda Errors","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":1,"properties":{"title":"ContactFlowErrors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-MainIVR",{"stat":"Sum","region":"${PrimaryRegion}"}],["...","ConnectChaos-ChaosTest"]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":1,"properties":{"title":"Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":1,"properties":{"title":"Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"text","width":24,"height":1,"x":0,"y":6,"properties":{"markdown":"## Paired Region (${PairedRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":7,"properties":{"title":"Lambda Errors","metrics":[["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":7,"properties":{"title":"ContactFlowErrors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${PairedInstanceIdEffective}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-MainIVR",{"stat":"Sum","region":"${PairedRegion}"}],["...","ConnectChaos-ChaosTest"]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":7,"properties":{"title":"Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":7,"properties":{"title":"Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${PairedInstanceIdEffective}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}}]}
+          {"widgets":[{"type":"text","width":24,"height":1,"x":0,"y":0,"properties":{"markdown":"## Primary Region (${PrimaryRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":1,"properties":{"title":"Exp 1 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":1,"properties":{"title":"Exp 2 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":1,"properties":{"title":"Exp 3 code-hook duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":1,"properties":{"title":"Exp 4 queue wait (sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"text","width":24,"height":1,"x":0,"y":6,"properties":{"markdown":"## Paired Region (${PairedRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":7,"properties":{"title":"Exp 1 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${PairedInstanceIdEffective}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":7,"properties":{"title":"Exp 2 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${PairedInstanceIdEffective}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":7,"properties":{"title":"Exp 3 code-hook duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":7,"properties":{"title":"Exp 4 queue wait (sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${PairedInstanceIdEffective}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}}]}
         - BotId: !GetAtt ConnectChaosBot.Id
           BotAliasId: !GetAtt ConnectChaosBotAlias.BotAliasId
           PairedInstanceIdEffective: !Ref PairedConnectInstanceId
