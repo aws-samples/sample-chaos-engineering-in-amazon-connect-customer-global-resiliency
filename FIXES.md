@@ -566,3 +566,73 @@ before any test call was spent on it.
 a *durable* replica, or whether an explicit `create-bot-replica` should be part of
 `post-deploy`. Until that is known, always run `make verify` after deploying and re-check it
 before a failover demonstration.
+
+---
+
+## Baseline call — verified on real telephony (IAD, `+448085478029`)
+
+First real inbound call against the IAD/PDX deployment, before any experiment. Full chain
+passed: Connect → call-logger direct invoke → DynamoDB write → Lex → fulfillment code hook →
+DynamoDB lookup → "Welcome back, John Doe".
+
+```
+ContactId      2b4a4ac7-34ef-4b3e-b0dc-bfd1a07ec61e   Channel VOICE   INBOUND
+CallLogger     Logged contact ... (ANI=+447345750038, region=us-east-1)   511 ms
+Lex            ConnectChaosBot QJ5VLLR4GH  alias IYOEXZUVAZ  platform Connect
+ASR            "one two three four five" -> interpretedValue "12345"  (confidence 1.0)
+Fulfillment    Intent LookupCustomer, Duration 300 ms, 0 errors
+```
+
+Two results from that single call are worth recording permanently.
+
+### Confirmed: the VPC design needs no NAT and no Logs endpoint
+
+Both Lambda log groups were created on first invocation, so a **VPC-attached Lambda writes
+CloudWatch Logs successfully with only the DynamoDB and S3 gateway endpoints** — no NAT
+gateway and no CloudWatch Logs interface endpoint. This closes the open question left by
+Fix 11; the interface endpoint that was deliberately not added speculatively is not needed.
+
+More importantly, the FIS extension proved it can reach S3 through the gateway endpoint:
+
+```
+AWS FIS EXTENSION - extension enabled 1.0.6
+AWS FIS EXTENSION - polling S3 for active faults impacting this Lambda function
+AWS FIS EXTENSION - no active faults found (updated polling interval 60s)
+```
+
+That is the concrete justification for the S3 gateway endpoint being mandatory rather than
+optional: without it this poll fails and Experiments 1 and 3 silently apply no fault at all,
+while every stack resource and alarm still reports healthy.
+
+### Correction to Fix 7 — the reason was wrong, the conclusion was right
+
+Fix 7 stated that `AWS/Lex RuntimeLambdaErrors` is not usable for Experiment 3 **because**
+Connect voice never reports `Operation=StartConversation`. The first half of that is correct;
+the stated cause is not.
+
+`list-metrics` after a real Connect voice call shows `StartConversation` unambiguously:
+
+```
+metric=RuntimeConcurrency             Operation=StartConversation  InputMode=Speech  alias=IYOEXZUVAZ
+metric=RuntimeRequestCount            Operation=StartConversation  InputMode=None    alias=IYOEXZUVAZ
+metric=RuntimeRequestLength           Operation=StartConversation  InputMode=None    alias=IYOEXZUVAZ
+metric=RuntimeSucessfulRequestLatency Operation=StartConversation  InputMode=Speech  alias=IYOEXZUVAZ
+metric=RuntimeRequestCount            Operation=GetConnectAudioResponseMode          alias=IYOEXZUVAZ
+```
+
+So Connect **does** drive Lex through the streaming `StartConversation` operation, exactly as
+the Lex V2 documentation describes.
+
+The real reason the metric is unusable is different and simpler: **`RuntimeLambdaErrors` is
+not emitted for this bot at all.** The only Lex-namespace metrics produced are
+`RuntimeConcurrency`, `RuntimeRequestCount`, `RuntimeRequestLength` and
+`RuntimeSucessfulRequestLatency` (note the AWS spelling of "Sucessful"), plus a
+`GetConnectAudioResponseMode` operation specific to the Connect integration.
+
+**Experiment 3 stays on `AWS/Lambda Duration`.** The decision is unchanged and correct. This
+entry exists so that nobody later reverses it after discovering that the reason recorded in
+Fix 7 does not hold — the conclusion is right for a different reason than originally written.
+
+**Do not** add `Operation=StartConversation` to a `RuntimeLambdaErrors` alarm. The dimension
+value is real, but the metric itself is never published, so such an alarm would sit in
+`INSUFFICIENT_DATA` indefinitely.
