@@ -781,7 +781,12 @@ Resources:
                   - connect:UpdateTrafficDistribution
                   - connect:GetTrafficDistribution
                   - connect:DescribeTrafficDistributionGroup
-                Resource: !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:traffic-distribution-group/*'
+                # Scoped to the TDG's OWN region (PrimaryRegion), not the deploying region.
+                # ${AWS::Region} here meant the paired region's role was scoped to a
+                # us-west-2 TDG ARN that does not exist, so it was denied even with the
+                # correct identifier. See FIXES.md Fix 17.
+                Resource: !Sub
+                  'arn:aws:connect:${PrimaryRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
 
   # ── Lex V2 Bot ──
   # When EnableLexGlobalResiliency=true (default): bot is created in PRIMARY only and
@@ -1024,7 +1029,12 @@ Resources:
         S3Key: connect-chaos/traffic_shift_handler.zip
       Environment:
         Variables:
-          TRAFFIC_DISTRIBUTION_GROUP_ID: !Ref TrafficDistributionGroupId
+          # MUST be the full ARN, not the bare UUID. A TDG resolves by bare ID only in the
+          # region it was created in; from the paired region that returns
+          # ResourceNotFoundException. Passing the ARN lets EITHER region drive the TDG,
+          # which is what makes failover possible when the primary region is impaired.
+          TRAFFIC_DISTRIBUTION_GROUP_ARN: !Sub
+            'arn:aws:connect:${PrimaryRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
           MY_REGION: !Ref 'AWS::Region'
           PRIMARY_REGION: !Ref PrimaryRegion
           PAIRED_REGION: !Ref PairedRegion

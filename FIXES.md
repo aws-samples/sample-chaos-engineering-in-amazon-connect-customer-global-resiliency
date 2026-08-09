@@ -767,3 +767,143 @@ which is the only reason it was not stated as a false fact.
 replicated bot alias with the *paired* instance. The paired region's `list-bots` is empty and
 its flow cannot reach Lex even with a healthy replica. This needs to move into
 `make post-deploy`, because it can only run once the Lex GR replica exists.
+
+---
+
+## Fix 16 — VERIFIED on real telephony (the paired region finally served a call)
+
+The open verification item carried since Fix 8 is now closed. With traffic at
+`us-east-1 0% / us-west-2 100%`, a real inbound call was answered entirely by the paired
+region:
+
+```
+us-west-2  contact 19:33:08Z
+us-west-2  CallLogger      "Logged contact 60e271fc... (ANI=+447345750038, region=us-west-2)"
+us-west-2  LexFulfillment  interpretedValue "12345"  intent LookupCustomer  0 errors
+us-east-1  0 contacts, 0 log events in BOTH function log groups
+```
+
+The primary region was completely idle. The paired region used **its own** call logger, **its
+own** Lex code hook resolved through the `$.AwsRegion` alias, and **its own** DynamoDB global
+table replica.
+
+This is the check that distinguishes "failover worked" from "failover moved traffic to a region
+that cannot answer". Every earlier verification of this sample only established the former.
+
+> Speech recognition note, since it will happen to anyone demoing this: on the first attempt the
+> caller's digits transcribed as *"look up account oh"* → `0`, and earlier as *"one two oh three
+> four five"* → `120345`. Say **"one two three four five"** deliberately. A failed lookup on a
+> wrong account number is a correct not-found response, not a fault — check the code hook's
+> `interpretedValue` in the log before concluding the experiment misbehaved.
+
+---
+
+## Fix 17 — The paired region could never fail over (bare TDG ID + wrong IAM scope)
+
+**Symptom:** at 18:49:05Z the paired region's `TrafficShiftHandler` fired on its own composite
+alarm and failed:
+
+```
+[WARNING] GetTrafficDistribution failed; proceeding with write. ResourceNotFoundException
+[ERROR]   UpdateTrafficDistribution failed: ResourceNotFoundException
+```
+
+**Root cause: two independent defects that both had to be fixed.**
+
+1. **Bare ID instead of ARN.** An ACGR traffic distribution group resolves by bare UUID *only*
+   in the region it was created in. Measured directly:
+
+   ```
+   us-east-1  bare id  -> OK
+   us-east-1  full arn -> OK
+   us-west-2  bare id  -> ResourceNotFoundException
+   us-west-2  full arn -> OK
+   ```
+
+   The handler passed `Id=<uuid>` from an environment variable, so it worked in the primary
+   region and was dead in the paired region.
+
+2. **IAM scoped to the wrong region.** The policy granted
+   `arn:aws:connect:${AWS::Region}:...:traffic-distribution-group/*`. In the paired region that
+   is a `us-west-2` ARN, while the TDG's ARN is `us-east-1` — so even with the correct
+   identifier the call would have been denied. Fixing only the identifier would have swapped
+   `ResourceNotFoundException` for `AccessDeniedException`.
+
+**Fix:** pass the full ARN, built from `PrimaryRegion`, and scope IAM to that same ARN:
+
+```yaml
+TRAFFIC_DISTRIBUTION_GROUP_ARN: !Sub
+  'arn:aws:connect:${PrimaryRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
+```
+
+`traffic_shift_handler.py` now raises at **import time** if the value is not an ARN, so a
+regression fails immediately and visibly rather than only during an incident.
+
+**Why this mattered more than it looked.** It is tempting to read the paired region's handler
+firing as a harmless duplicate — the primary already shifted traffic, so who cares. But the
+scenario this sample exists to demonstrate is a region becoming unhealthy, and in that scenario
+**the surviving region is the only one that can move traffic**. That path was broken from the
+first commit, and the idempotency guard in `shift_traffic` masked it: the guard is what makes a
+double-shift harmless, so nobody had reason to look at the paired region's failure.
+
+---
+
+## Tooling gaps closed alongside Fixes 16 and 17
+
+These are not template defects, but every one of them is a reason today's failures took as long
+to find as they did.
+
+**`make verify` proved nothing about the paired region.** It checked that the Lex *bot* replica
+existed and stopped there. It now also asserts, in the paired region: the Lex **alias** replica
+is `Available`; the alias is associated with the paired Connect instance; both Lambdas exist and
+carry a resource policy that permits invocation; the call logger is associated with the instance;
+and — in **both** regions — that the deployed flow's Lambda and Lex ARNs use `$.AwsRegion`. That
+last check is the one that would have caught Fix 16 without spending a phone call.
+
+**`make reset` did not exist.** The runbook instructs a reset between every experiment and gave
+copy-paste commands. It is now a target that stops running experiments in both regions, restores
+100/0, disarms the chaos flag, and waits for alarms in **both** regions to clear before
+returning — the last point matters because a stop-condition alarm still in `ALARM` compromises
+the next run.
+
+**The reference contact-flow JSONs are now generated.** `scripts/extract-flows.py` derives them
+from the template's inline content and `make lint` fails if they diverge. They had drifted far
+enough to contradict their own README, which described an `InvokeLambdaFunction` block the JSON
+did not contain.
+
+**`make post-deploy` now wires Lex in the paired region.** `LexBotAssociation` is
+`Condition: IsPrimaryRegion`, so a fresh deploy left the paired instance with no Lex association
+at all and no way for its flow to reach the bot. `post-deploy` now ensures the bot replica
+exists, waits for the **alias** replica to become `Available`, and associates it with the paired
+instance. It cannot live in the template because it depends on a replica that only exists after
+both stacks are up.
+
+---
+
+## Environmental hazard — a third-party replicator in the same account
+
+Not a defect in this sample, recorded because it cost hours of misdiagnosis and will mislead
+anyone testing in a shared account.
+
+An unrelated stack, `ConnectAcgrReplicatorStack`, ran in this account and swept resources whose
+names overlap this sample's:
+
+```
+12:20:30  CreateFunction  LexFulfillmentHandler, ConnectChaos-CallLogger   (us-west-2)
+12:30:16  DeleteBotReplica  QJ5VLLR4GH                                     (us-east-1)
+12:30:17  DeleteFunction    ConnectChaos-CallLogger                        (us-west-2)
+12:30:18  DeleteFunction    LexFulfillmentHandler                          (us-west-2)
+```
+
+Consequences worth internalising:
+
+- **CloudFormation kept reporting `CREATE_COMPLETE` for resources that no longer existed.** Stack
+  status is not evidence that a resource is present. `detect-stack-drift` reported the two
+  `Lambda::Permission`s and the `IntegrationAssociation` as `DELETED` and both functions as
+  `MODIFIED`; that is the tool that tells the truth.
+- **This is very likely the unexplained disappearance recorded in Fix 14.** That entry closed
+  with "root cause not established" because no CloudTrail record was found in the window
+  examined. A `DeleteBotReplica` by this replicator is now on record, which supplies the
+  mechanism even though the original incident itself remains unconfirmed.
+- If you test in a shared account, run `make verify` immediately before each call. Resources can
+  vanish between a passing preflight and a test.

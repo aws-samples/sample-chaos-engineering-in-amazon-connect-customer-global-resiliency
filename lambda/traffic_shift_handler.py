@@ -12,6 +12,13 @@ Idempotency:
     2. Repeated EventBridge invocations on the same alarm transition.
     3. Manual operator action having already shifted traffic.
 
+Identifier:
+  The TDG is addressed by its full ARN. An ACGR traffic distribution group resolves by
+  bare UUID ONLY in the region it was created in - from the paired region that call
+  returns ResourceNotFoundException, which silently disabled failover from the surviving
+  region. This is asserted at import time so a regression fails fast and loudly rather
+  than only during an incident.
+
 Region-pair correctness:
   ACGR's TelephonyConfig.Distributions array MUST sum to exactly 100 across
   exactly the two pair regions, in 10% increments. We always write a complete
@@ -27,10 +34,19 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-TRAFFIC_DISTRIBUTION_GROUP_ID = os.environ['TRAFFIC_DISTRIBUTION_GROUP_ID']
+# Full ARN, never the bare UUID. A TDG resolves by bare ID only in its home region; the
+# paired region gets ResourceNotFoundException. See FIXES.md Fix 17.
+TRAFFIC_DISTRIBUTION_GROUP_ARN = os.environ['TRAFFIC_DISTRIBUTION_GROUP_ARN']
 MY_REGION = os.environ['MY_REGION']
 PRIMARY_REGION = os.environ['PRIMARY_REGION']
 PAIRED_REGION = os.environ['PAIRED_REGION']
+
+if not TRAFFIC_DISTRIBUTION_GROUP_ARN.startswith('arn:'):
+    raise ValueError(
+        'TRAFFIC_DISTRIBUTION_GROUP_ARN must be a full ARN, not a bare UUID: '
+        f'{TRAFFIC_DISTRIBUTION_GROUP_ARN!r}. A bare ID only resolves in the TDG home '
+        'region, so the paired region could not fail over. See FIXES.md Fix 17.'
+    )
 
 connect_client = boto3.client('connect')
 
@@ -56,7 +72,7 @@ def shift_traffic(away_from, towards):
     """Idempotently set TDG distribution to 0/100 (away_from = 0%)."""
     # Idempotency guard: skip the write if the TDG is already shifted away from this region.
     try:
-        current = connect_client.get_traffic_distribution(Id=TRAFFIC_DISTRIBUTION_GROUP_ID)
+        current = connect_client.get_traffic_distribution(Id=TRAFFIC_DISTRIBUTION_GROUP_ARN)
         existing = {
             row['Region']: row.get('Percentage', 0)
             for row in current.get('TelephonyConfig', {}).get('Distributions', [])
@@ -76,7 +92,7 @@ def shift_traffic(away_from, towards):
 
     try:
         connect_client.update_traffic_distribution(
-            Id=TRAFFIC_DISTRIBUTION_GROUP_ID,
+            Id=TRAFFIC_DISTRIBUTION_GROUP_ARN,
             TelephonyConfig={
                 'Distributions': [
                     {'Region': away_from, 'Percentage': 0},

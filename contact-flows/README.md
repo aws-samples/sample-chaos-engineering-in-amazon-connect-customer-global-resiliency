@@ -1,8 +1,12 @@
 # Contact Flow Reference Files
 
-> **⚠️ These JSON files are reference copies only.** They are NOT deployed and may drift from
-> the authoritative inline versions in `cfn/main-template.yaml`, which are the single source
-> of truth.
+> **⚠️ These JSON files are GENERATED and are not deployed.** The authoritative flow content is
+> the inline `Content` property in `cfn/main-template.yaml`. Regenerate with `make flows`;
+> `make lint` fails if they have drifted.
+>
+> They used to be hand-maintained copies, and drifted until they contradicted this README —
+> it described an `InvokeLambdaFunction` block the JSON did not contain. Generating them makes
+> that class of error impossible rather than relying on discipline.
 
 ## ACGR: use `$.AwsRegion`, never a hardcoded Region
 
@@ -56,4 +60,9 @@ indefinitely, driving `LongestQueueWaitTime` (`FIXES.md` Fix 9).
 ## Updating flows
 
 Edit the inline `Content` property in `cfn/main-template.yaml` — that is what CloudFormation
-deploys. Updating these reference copies is optional and has no effect on a deployment.
+deploys — then run `make flows` to regenerate these copies. Do not edit the JSON directly;
+`make lint` will fail because it regenerates them and compares.
+
+`$.AwsRegion` is preserved verbatim by the generator. It is a Connect **runtime** token, not a
+CloudFormation reference, and it must survive into the deployed flow for the paired region to
+work at all — see `FIXES.md` Fix 8 (Lex ARN) and Fix 16 (Lambda ARN).

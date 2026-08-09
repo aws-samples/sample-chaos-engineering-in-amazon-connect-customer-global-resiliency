@@ -277,24 +277,36 @@ Open the dashboard: **CloudWatch → Dashboards → `ConnectChaos-<primary-regio
 ## Step R — Reset between every experiment
 
 ```bash
-# 1. Stop anything still running
+make reset STACK=$STACK PRIMARY_REGION=$PRIMARY_REGION \
+           PAIRED_REGION=$PAIRED_REGION TDG_ID=$TDG_ID
+```
+
+It stops running experiments in **both** regions, restores 100% primary / 0% paired, disarms
+the Exp 4 chaos flag, then waits for every alarm in both regions to leave `ALARM` — and exits
+non-zero if they do not. Do not start the next experiment until it exits 0.
+
+The alarm wait is not cosmetic. Each experiment's stop condition is its **own** detection
+alarm, so an alarm still in `ALARM` compromises the next run.
+
+<details>
+<summary>Equivalent manual commands</summary>
+
+```bash
 aws fis list-experiments --region $PRIMARY_REGION \
   --query "experiments[?state.status=='running'].id" --output text
 
-# 2. Restore 100% primary / 0% paired
 aws connect update-traffic-distribution --id $TDG_ID --region $PRIMARY_REGION \
   --telephony-config "{\"Distributions\":[{\"Region\":\"$PRIMARY_REGION\",\"Percentage\":100},{\"Region\":\"$PAIRED_REGION\",\"Percentage\":0}]}"
 
-# 3. Confirm
-aws connect get-traffic-distribution --id $TDG_ID --region $PRIMARY_REGION \
-  --query "TelephonyConfig.Distributions"
+aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
+  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
 
-# 4. Wait until this returns EMPTY
+# must return EMPTY, in BOTH regions
 aws cloudwatch describe-alarms --region $PRIMARY_REGION --alarm-name-prefix ConnectChaos- \
   --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text
 ```
 
-Do not start the next experiment until step 4 is empty.
+</details>
 
 ---
 

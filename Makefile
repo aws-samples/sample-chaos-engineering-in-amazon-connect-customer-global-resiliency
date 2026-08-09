@@ -24,12 +24,12 @@ TEMPLATE   := cfn/main-template.yaml
 LAMBDAS := lex_fulfillment_handler traffic_shift_handler traffic_generator call_logger
 ZIPS    := $(addprefix $(BUILD_DIR)/,$(addsuffix .zip,$(LAMBDAS)))
 
-.PHONY: all package upload deploy clean lint help
+.PHONY: all package upload deploy clean lint flows help
 
 all: package
 
 help:
-	@echo "Targets: package, bucket, bootstrap, deploy, deploy-pair, post-deploy, verify, lint, clean, help"
+	@echo "Targets: package, bucket, bootstrap, deploy, deploy-pair, post-deploy, verify, reset, lint, flows, clean, help"
 	@grep -E '^# {2,}make' Makefile | sed 's/^# //'
 
 $(BUILD_DIR):
@@ -177,7 +177,7 @@ deploy-pair:
 #
 # Idempotent: safe to re-run.
 # ─────────────────────────────────────────────────────────────────────────────
-.PHONY: post-deploy verify
+.PHONY: post-deploy verify reset
 
 post-deploy:
 	@set -e; \
@@ -223,12 +223,97 @@ post-deploy:
 	aws connect associate-phone-number-contact-flow --phone-number-id $$PN \
 	  --instance-id $(INSTANCE_ID) --contact-flow-id $$FLOW --region $(PRIMARY_REGION); \
 	echo "    associated"; \
-	echo "=== 3/3 resetting traffic to 100% primary / 0% paired ==="; \
+	echo "=== 3/4 wiring Lex in the PAIRED region ==="; \
+	BOT=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $(PRIMARY_REGION) \
+	        --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue|[0]" --output text); \
+	ALIAS=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $(PRIMARY_REGION) \
+	        --query "Stacks[0].Outputs[?OutputKey=='LexBotAliasId'].OutputValue|[0]" --output text); \
+	if [ -z "$$BOT" ] || [ "$$BOT" = "None" ]; then \
+	  echo "    no local Lex bot in the primary stack; skipping (ENABLE_LEX_GR=false?)"; \
+	else \
+	  echo "    bot=$$BOT alias=$$ALIAS"; \
+	  R=$$(aws lexv2-models list-bot-replicas --bot-id $$BOT --region $(PRIMARY_REGION) \
+	        --query "botReplicaSummaries[?replicaRegion=='$(PAIRED_REGION)'].botReplicaStatus|[0]" \
+	        --output text 2>/dev/null); \
+	  if [ "$$R" != "Enabled" ]; then \
+	    echo "    bot replica in $(PAIRED_REGION) is '$$R' - creating it (see FIXES.md Fix 14)"; \
+	    aws lexv2-models create-bot-replica --bot-id $$BOT --replica-region $(PAIRED_REGION) \
+	      --region $(PRIMARY_REGION) >/dev/null || true; \
+	  fi; \
+	  echo "    waiting for the ALIAS replica to become Available (the flow's \$$.AwsRegion ARN resolves to the ALIAS, not the bot)"; \
+	  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do \
+	    A=$$(aws lexv2-models list-bot-alias-replicas --bot-id $$BOT --replica-region $(PAIRED_REGION) \
+	          --region $(PRIMARY_REGION) \
+	          --query "botAliasReplicaSummaries[?botAliasId=='$$ALIAS'].botAliasReplicationStatus|[0]" \
+	          --output text 2>/dev/null); \
+	    echo "      attempt $$i: alias replica = $$A"; \
+	    [ "$$A" = "Available" ] && break; sleep 15; \
+	  done; \
+	  if [ "$$A" != "Available" ]; then \
+	    echo "ERROR: alias replica never became Available; the paired region cannot serve a call."; exit 1; \
+	  fi; \
+	  echo "    associating the replicated alias with the PAIRED Connect instance"; \
+	  ARN="arn:aws:lex:$(PAIRED_REGION):$$(aws sts get-caller-identity --query Account --output text):bot-alias/$$BOT/$$ALIAS"; \
+	  aws connect associate-bot --instance-id $(INSTANCE_ID) --region $(PAIRED_REGION) \
+	    --lex-v2-bot AliasArn=$$ARN 2>/dev/null \
+	    && echo "    associated $$ARN" \
+	    || echo "    already associated (or association returned a conflict) - continuing"; \
+	fi; \
+	echo "=== 4/4 resetting traffic to 100% primary / 0% paired ==="; \
 	aws connect update-traffic-distribution --id $(TDG_ID) --region $(PRIMARY_REGION) \
 	  --telephony-config '{"Distributions":[{"Region":"$(PRIMARY_REGION)","Percentage":100},{"Region":"$(PAIRED_REGION)","Percentage":0}]}'; \
 	aws connect get-traffic-distribution --id $(TDG_ID) --region $(PRIMARY_REGION) \
 	  --query "TelephonyConfig.Distributions[].[Region,Percentage]" --output text; \
 	echo "=== post-deploy complete - run 'make verify' next ==="
+
+# ─────────────────────────────────────────────────────────────────────────────
+# reset: return to a clean pre-experiment state. RUNBOOK Step R, as a target -
+# it is required between every experiment and was previously copy-paste only.
+#   make reset PRIMARY_REGION=.. PAIRED_REGION=.. TDG_ID=.. STACK=..
+# ─────────────────────────────────────────────────────────────────────────────
+reset:
+	@set -e; \
+	if [ -z "$(STACK)" ] || [ -z "$(PRIMARY_REGION)" ] || [ -z "$(PAIRED_REGION)" ] \
+	   || [ -z "$(TDG_ID)" ]; then \
+	  echo "Required: STACK PRIMARY_REGION PAIRED_REGION TDG_ID"; exit 2; \
+	fi; \
+	echo "=== 1/4 stopping any running experiments ==="; \
+	for R in $(PRIMARY_REGION) $(PAIRED_REGION); do \
+	  for E in $$(aws fis list-experiments --region $$R \
+	              --query "experiments[?state.status=='running'].id" --output text); do \
+	    echo "    stopping $$E in $$R"; \
+	    aws fis stop-experiment --id $$E --region $$R >/dev/null; \
+	  done; \
+	done; \
+	echo "=== 2/4 restoring 100% primary / 0% paired ==="; \
+	aws connect update-traffic-distribution --id $(TDG_ID) --region $(PRIMARY_REGION) \
+	  --telephony-config '{"Distributions":[{"Region":"$(PRIMARY_REGION)","Percentage":100},{"Region":"$(PAIRED_REGION)","Percentage":0}]}'; \
+	aws connect get-traffic-distribution --id $(TDG_ID) --region $(PRIMARY_REGION) \
+	  --query "TelephonyConfig.Distributions[].[Region,Percentage]" --output text; \
+	echo "=== 3/4 disarming the Exp 4 chaos flag ==="; \
+	aws dynamodb put-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
+	  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'; \
+	echo "    chaos_flag = false"; \
+	echo "=== 4/4 waiting for alarms to clear ==="; \
+	for i in 1 2 3 4 5 6 7 8 9 10; do \
+	  BAD=""; \
+	  for R in $(PRIMARY_REGION) $(PAIRED_REGION); do \
+	    MA=$$(aws cloudwatch describe-alarms --region $$R --alarm-name-prefix ConnectChaos- \
+	          --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text); \
+	    CA=$$(aws cloudwatch describe-alarms --region $$R --alarm-name-prefix ConnectChaos- \
+	          --alarm-types CompositeAlarm \
+	          --query "CompositeAlarms[?StateValue=='ALARM'].AlarmName" --output text); \
+	    BAD="$$BAD $$MA $$CA"; \
+	  done; \
+	  BAD=$$(echo $$BAD | sed 's/None//g' | xargs); \
+	  if [ -z "$$BAD" ]; then echo "    all alarms clear"; break; fi; \
+	  echo "      attempt $$i still in ALARM: $$BAD"; sleep 20; \
+	done; \
+	if [ -n "$$BAD" ]; then \
+	  echo "WARNING: alarms still in ALARM. Do NOT start the next experiment yet -"; \
+	  echo "         a stop-condition alarm already in ALARM prevents a clean run."; exit 1; \
+	fi; \
+	echo "=== reset complete ==="
 
 # ─────────────────────────────────────────────────────────────────────────────
 # verify: preflight before testing. Reports PASS/FAIL per check.
@@ -278,6 +363,54 @@ verify:
 	    echo "             scripts/wire-paired-flow.sh"; FAIL=1; \
 	  fi; \
 	fi; \
+	echo "=== paired region: can it actually INVOKE anything? ==="; \
+	ACCT=$$(aws sts get-caller-identity --query Account --output text); \
+	IID=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $(PAIRED_REGION) \
+	       --query "Stacks[0].Parameters[?ParameterKey=='ConnectInstanceId'].ParameterValue|[0]" --output text); \
+	if [ -n "$$PBOT" ] && [ "$$PBOT" != "None" ]; then \
+	  AR=$$(aws lexv2-models list-bot-alias-replicas --bot-id $$PBOT --replica-region $(PAIRED_REGION) \
+	        --region $(PRIMARY_REGION) \
+	        --query "botAliasReplicaSummaries[?botAliasReplicationStatus=='Available'].botAliasId" \
+	        --output text 2>/dev/null); \
+	  if [ -n "$$AR" ]; then echo "  PASS  Lex ALIAS replica(s) Available in $(PAIRED_REGION): $$AR"; \
+	  else echo "  FAIL  no Lex ALIAS replica Available - the bot replica alone is NOT enough,"; \
+	       echo "        the flow's \$$.AwsRegion ARN resolves to the ALIAS (FIXES.md Fix 14)"; FAIL=1; fi; \
+	fi; \
+	B=$$(aws connect list-bots --instance-id $$IID --lex-version V2 --region $(PAIRED_REGION) \
+	     --query "LexBots[].LexV2Bot.AliasArn" --output text 2>/dev/null); \
+	if [ -n "$$B" ]; then echo "  PASS  paired instance has a Lex alias associated"; \
+	else echo "  FAIL  paired instance has NO Lex bot association - its flow cannot reach Lex."; \
+	     echo "        LexBotAssociation is primary-only by design; run 'make post-deploy'"; FAIL=1; fi; \
+	for FN in ConnectChaos-CallLogger LexFulfillmentHandler; do \
+	  ST=$$(aws lambda get-function --function-name $$FN --region $(PAIRED_REGION) \
+	        --query "Configuration.State" --output text 2>/dev/null || echo MISSING); \
+	  if [ "$$ST" != "Active" ]; then echo "  FAIL  $$FN in $(PAIRED_REGION): $$ST"; FAIL=1; \
+	  else \
+	    POL=$$(aws lambda get-policy --function-name $$FN --region $(PAIRED_REGION) \
+	           --query Policy --output text 2>/dev/null || echo NONE); \
+	    case "$$POL" in *amazonaws.com*) echo "  PASS  $$FN Active with an invoke policy";; \
+	      *) echo "  FAIL  $$FN has NO resource policy - nothing may invoke it"; FAIL=1;; esac; \
+	  fi; \
+	done; \
+	L=$$(aws connect list-lambda-functions --instance-id $$IID --region $(PAIRED_REGION) \
+	     --query "LambdaFunctions[?contains(@,'ConnectChaos-CallLogger')]" --output text 2>/dev/null); \
+	if [ -n "$$L" ]; then echo "  PASS  call logger associated with the paired instance"; \
+	else echo "  FAIL  call logger NOT associated with the paired instance"; FAIL=1; fi; \
+	echo "=== flow content is region-agnostic in BOTH regions ==="; \
+	for R in $(PRIMARY_REGION) $(PAIRED_REGION); do \
+	  RID=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $$R \
+	         --query "Stacks[0].Parameters[?ParameterKey=='ConnectInstanceId'].ParameterValue|[0]" --output text); \
+	  FID=$$(aws connect list-contact-flows --instance-id $$RID --region $$R \
+	         --query "ContactFlowSummaryList[?Name=='ConnectChaos-MainIVR'].Id|[0]" --output text 2>/dev/null); \
+	  if [ -z "$$FID" ] || [ "$$FID" = "None" ]; then echo "  FAIL  $$R: ConnectChaos-MainIVR not found"; FAIL=1; continue; fi; \
+	  CT=$$(aws connect describe-contact-flow --instance-id $$RID --contact-flow-id $$FID \
+	        --region $$R --query "ContactFlow.Content" --output text 2>/dev/null); \
+	  case "$$CT" in *'arn:aws:lambda:$$.AwsRegion:'*) echo "  PASS  $$R: Lambda ARN uses \$$.AwsRegion";; \
+	    *) echo "  FAIL  $$R: flow pins the Lambda to one region - the paired region will"; \
+	       echo "        invoke the WRONG region's function and error (FIXES.md Fix 16)"; FAIL=1;; esac; \
+	  case "$$CT" in *'arn:aws:lex:$$.AwsRegion:'*) echo "  PASS  $$R: Lex ARN uses \$$.AwsRegion";; \
+	    *) echo "  FAIL  $$R: flow pins the Lex alias to one region (FIXES.md Fix 8)"; FAIL=1;; esac; \
+	done; \
 	echo "=== seed data ==="; \
 	C=$$(aws dynamodb get-item --table-name $(STACK)-Customers --region $(PRIMARY_REGION) \
 	     --key '{"account_id":{"S":"12345"}}' --query "Item.customer_name.S" --output text 2>/dev/null); \
@@ -293,11 +426,17 @@ verify:
 	     --query "TelephonyConfig.Distributions[?Region=='$(PRIMARY_REGION)'].Percentage | [0]" --output text); \
 	if [ "$$P" = "100" ]; then echo "  PASS  $(PRIMARY_REGION) at 100%"; \
 	else echo "  FAIL  $(PRIMARY_REGION) at $$P% - not a clean baseline, run 'make post-deploy'"; FAIL=1; fi; \
-	echo "=== alarms ==="; \
-	A=$$(aws cloudwatch describe-alarms --region $(PRIMARY_REGION) --alarm-name-prefix ConnectChaos- \
-	     --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text); \
-	if [ -z "$$A" ]; then echo "  PASS  no component alarm in ALARM"; \
-	else echo "  FAIL  still in ALARM: $$A"; FAIL=1; fi; \
+	echo "=== alarms (both regions - a stop-condition alarm already in ALARM blocks a clean run) ==="; \
+	for R in $(PRIMARY_REGION) $(PAIRED_REGION); do \
+	  MA=$$(aws cloudwatch describe-alarms --region $$R --alarm-name-prefix ConnectChaos- \
+	        --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text); \
+	  CA=$$(aws cloudwatch describe-alarms --region $$R --alarm-name-prefix ConnectChaos- \
+	        --alarm-types CompositeAlarm \
+	        --query "CompositeAlarms[?StateValue=='ALARM'].AlarmName" --output text); \
+	  BOTH=$$(echo $$MA $$CA | sed 's/None//g' | xargs); \
+	  if [ -z "$$BOTH" ]; then echo "  PASS  $$R: nothing in ALARM"; \
+	  else echo "  FAIL  $$R still in ALARM: $$BOTH  (run 'make reset')"; FAIL=1; fi; \
+	done; \
 	echo "=== phone number ==="; \
 	N=$$(aws connect list-phone-numbers-v2 --region $(PRIMARY_REGION) --max-results 100 \
 	     --query "ListPhoneNumbersSummaryList[?contains(TargetArn,'$(TDG_ID)')].PhoneNumber" --output text); \
@@ -318,6 +457,13 @@ lint:
 	bash -n scripts/wire-paired-flow.sh
 	python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ['$(LAMBDA_DIR)/lex_fulfillment_handler.py', '$(LAMBDA_DIR)/traffic_shift_handler.py', '$(LAMBDA_DIR)/traffic_generator.py', '$(LAMBDA_DIR)/call_logger.py']]; print('Python: OK')"
 	python3 -c "import json; [json.load(open(f)) for f in ['contact-flows/main-ivr-flow.json', 'contact-flows/chaos-test-flow.json']]; print('JSON: OK')"
+	# The reference flows are GENERATED from the template. Fail if they have drifted,
+	# rather than shipping reference files that contradict what is deployed.
+	python3 scripts/extract-flows.py --check
+
+# Regenerate the reference contact-flow JSONs from cfn/main-template.yaml.
+flows:
+	python3 scripts/extract-flows.py
 
 clean:
 	rm -rf $(BUILD_DIR)

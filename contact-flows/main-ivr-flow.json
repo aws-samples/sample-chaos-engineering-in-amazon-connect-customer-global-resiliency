@@ -1,130 +1,117 @@
 {
   "Version": "2019-10-30",
-  "StartAction": "entry-point",
-  "Metadata": {
-    "entryPointPosition": {"x": 20, "y": 20},
-    "ActionMetadata": {}
-  },
+  "StartAction": "entry",
   "Actions": [
     {
-      "Identifier": "entry-point",
+      "Identifier": "entry",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "Welcome to our customer service line. I can help you look up your account or check an order status."
+        "Text": "Welcome to customer service. I can help you look up your account or check an order."
       },
       "Transitions": {
-        "NextAction": "get-customer-input",
+        "NextAction": "log-call",
         "Errors": [
-          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"}
+          {
+            "NextAction": "error-msg",
+            "ErrorType": "NoMatchingError"
+          }
         ]
       }
     },
     {
-      "Identifier": "get-customer-input",
+      "Identifier": "log-call",
+      "Type": "InvokeLambdaFunction",
+      "Parameters": {
+        "LambdaFunctionARN": "arn:aws:lambda:$.AwsRegion:ACCOUNT_ID:function:ConnectChaos-CallLogger",
+        "InvocationTimeLimitSeconds": "8"
+      },
+      "Transitions": {
+        "NextAction": "lex-input",
+        "Errors": [
+          {
+            "NextAction": "error-msg",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "lex-input",
       "Type": "ConnectParticipantWithLexBot",
       "Parameters": {
+        "Text": "How can I help you today? You can ask to look up your account or check an order.",
         "LexV2Bot": {
-          "AliasArn": "PLACEHOLDER_LEX_BOT_ALIAS_ARN"
+          "AliasArn": "arn:aws:lex:$.AwsRegion:ACCOUNT_ID:bot-alias/BOT_ID/BOT_ALIAS_ID"
         }
       },
       "Transitions": {
-        "NextAction": "lex-error-handling",
+        "NextAction": "success-msg",
         "Conditions": [
           {
-            "NextAction": "lookup-success",
+            "NextAction": "success-msg",
             "Condition": {
               "Operator": "Equals",
-              "Operands": ["LookupCustomer"]
+              "Operands": [
+                "LookupCustomer"
+              ]
             }
           },
           {
-            "NextAction": "order-success",
+            "NextAction": "success-msg",
             "Condition": {
               "Operator": "Equals",
-              "Operands": ["CheckOrderStatus"]
+              "Operands": [
+                "CheckOrderStatus"
+              ]
             }
           }
         ],
         "Errors": [
           {
-            "NextAction": "lex-error-handling",
+            "NextAction": "error-msg",
             "ErrorType": "NoMatchingError"
           },
           {
-            "NextAction": "lex-error-handling",
+            "NextAction": "error-msg",
             "ErrorType": "NoMatchingCondition"
           }
         ]
       }
     },
     {
-      "Identifier": "lookup-success",
+      "Identifier": "success-msg",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "I've found your account. Let me transfer you to an agent who can assist further."
+        "Text": "I found your information. Transferring to an agent."
       },
       "Transitions": {
-        "NextAction": "transfer-to-queue",
+        "NextAction": "disconnect",
         "Errors": [
-          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"}
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "NoMatchingError"
+          }
         ]
       }
     },
     {
-      "Identifier": "order-success",
+      "Identifier": "error-msg",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "I have your order information. Transferring you to support."
+        "Text": "We are experiencing difficulties. Please try again later."
       },
       "Transitions": {
-        "NextAction": "transfer-to-queue",
+        "NextAction": "disconnect",
         "Errors": [
-          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"}
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "NoMatchingError"
+          }
         ]
       }
     },
     {
-      "Identifier": "lex-error-handling",
-      "Type": "MessageParticipant",
-      "Parameters": {
-        "Text": "I'm sorry, we're experiencing technical difficulties. Let me transfer you to an agent."
-      },
-      "Transitions": {
-        "NextAction": "transfer-to-queue",
-        "Errors": [
-          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"}
-        ]
-      }
-    },
-    {
-      "Identifier": "transfer-to-queue",
-      "Type": "TransferContactToQueue",
-      "Parameters": {
-        "QueueId": "PLACEHOLDER_QUEUE_ID"
-      },
-      "Transitions": {
-        "NextAction": "end-contact",
-        "Errors": [
-          {"NextAction": "error-disconnect", "ErrorType": "NoMatchingError"},
-          {"NextAction": "error-disconnect", "ErrorType": "QueueAtCapacity"}
-        ]
-      }
-    },
-    {
-      "Identifier": "error-disconnect",
-      "Type": "MessageParticipant",
-      "Parameters": {
-        "Text": "We apologize for the inconvenience. Please try calling again later."
-      },
-      "Transitions": {
-        "NextAction": "end-contact",
-        "Errors": [
-          {"NextAction": "end-contact", "ErrorType": "NoMatchingError"}
-        ]
-      }
-    },
-    {
-      "Identifier": "end-contact",
+      "Identifier": "disconnect",
       "Type": "DisconnectParticipant",
       "Parameters": {},
       "Transitions": {}
