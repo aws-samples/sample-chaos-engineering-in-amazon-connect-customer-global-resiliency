@@ -187,10 +187,10 @@ reliable path.
 London 0% / Frankfurt 100%. (Initially verified with an equivalent `get_item` health-check
 probe; reshaped into the call-logger write path for realism — same error-branch behavior.)
 
-> Note on threshold: with the shipped default `ContactFlowErrorsThreshold=5` a single test
-> call (1 error) will not trip the alarm. For a live demo where the presenter places one
-> or two calls, deploy with a lower threshold (e.g. `ContactFlowErrorsThreshold=0`, which
-> fires on the first error) — this is how the end-to-end verification above was run.
+> Note on threshold: the fault working is not the same as the alarm firing. One test call
+> produces exactly **one** `ContactFlowErrors` datapoint, so any threshold above 0 cannot be
+> exceeded by a single call. `ContactFlowErrorsThreshold` therefore defaults to `0`. This was
+> originally `5`, which silently blocked the experiment — see Fix 15.
 
 ---
 
@@ -636,3 +636,62 @@ Fix 7 does not hold — the conclusion is right for a different reason than orig
 **Do not** add `Operation=StartConversation` to a `RuntimeLambdaErrors` alarm. The dimension
 value is real, but the metric itself is never published, so such an alarm would sit in
 `INSUFFICIENT_DATA` indefinitely.
+
+---
+
+## Fix 15 — Alarm thresholds made a working fault unobservable (Exps 1 and 2)
+
+**Symptom:** Experiment 2 was started against the IAD deployment and the fault worked exactly
+as designed — the caller heard *"We are experiencing difficulties"* and Connect recorded
+`ContactFlowErrors = 1.0` on `ConnectChaos-MainIVR`. Yet `ConnectChaos-ContactFlow-Errors`
+stayed in `OK`, the composite alarm never fired, no EventBridge rule matched, no traffic
+shifted. Every layer looked correct in isolation.
+
+**Root cause: arithmetic, not chaos.** The alarm compared the metric with
+`GreaterThanThreshold` against `ContactFlowErrorsThreshold`, default `5`, over a single 60 s
+period. One inbound call produces exactly one error, and `1 > 5` is false. The threshold was
+a sensible production monitoring value carried into a sample whose entire demonstration is
+**one** phone call, so it could never be satisfied.
+
+Experiment 1 had the same defect and was worse: its `Threshold: 5` was **hardcoded** in
+`AlarmLambdaErrors` with no parameter at all, so it could not even be overridden at deploy
+time.
+
+Experiments 3 and 4 were unaffected — their signals are magnitudes, not counts, so a single
+call already clears them (Duration ~31 000 ms vs 7 000; queue wait ~90 s vs 60).
+
+**Fix:**
+
+| Parameter | Was | Now |
+|---|---|---|
+| `ContactFlowErrorsThreshold` | `5` | `0` |
+| `LambdaErrorsThreshold` | *did not exist* (hardcoded `5`) | `0`, referenced by `AlarmLambdaErrors` |
+
+With `GreaterThanThreshold` and a threshold of `0`, a single error trips the alarm. Both are
+parameters, so raising them for production monitoring is a deploy-time choice, and `make
+deploy` passes them through (`CONTACT_FLOW_ERRORS_THRESHOLD`, `LAMBDA_ERRORS_THRESHOLD`).
+No hardcoded numeric `Threshold` remains in the template.
+
+**Side effect: the FIS stop conditions become live.** Each experiment's stop condition is its
+*own* detection alarm (`AlarmLambdaErrors` guards Exp 1, `AlarmContactFlowErrors` guards
+Exp 2). At threshold `5` those guardrails were **inert** — a single-call demo could never
+trigger them. At `0` they work as designed: the experiment self-terminates the moment impact
+is detected, and the fault is withdrawn. Failover is unaffected, because the alarm state
+change reaches EventBridge and the composite alarm independently of the experiment's
+lifecycle. Two practical consequences:
+
+- An experiment that ends in `stopped` with a stop-condition reason is a **success**, not a
+  failure. It means the alarm fired.
+- The alarm must be back in `OK` before re-running, which is why Step R of the runbook waits
+  for `describe-alarms` to return empty. `make verify` asserts the same thing.
+
+Applying this to a live stack is a two-alarm, in-place change, but CloudFormation also lists
+`FISExperimentDDBDisruption` and `FISExperimentLambdaFailure` in the change set. Those are
+`Dynamic`/`ResourceAttribute` ripples from `StopConditions` referencing `<alarm>.Arn`; the
+alarm names are unchanged, so the ARNs are unchanged and they are no-ops.
+
+**The generalisable lesson.** When validating a chaos experiment, verify the *fault*, the
+*metric* and the *alarm* as three separate steps. This failure sat entirely in the last one
+while the first two were provably healthy, which is why it read as "the experiment does not
+work" rather than "the threshold is wrong". `describe-alarms` on the child alarm — not the
+composite — is the check that localises it in seconds.

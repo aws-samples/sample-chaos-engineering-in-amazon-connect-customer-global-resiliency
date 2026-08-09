@@ -112,9 +112,25 @@ Parameters:
       x86_64 extension for this region automatically.
     Default: /aws/service/fis/lambda-extension/AWS-FIS-extension-x86_64/1.x.x
 
+  LambdaErrorsThreshold:
+    Type: Number
+    Default: 0
+    Description: >-
+      (Exp 1) Alarm threshold for AWS/Lambda Errors, compared with GreaterThanThreshold.
+      Default 0 means a SINGLE failed invocation trips the alarm. Previously this alarm had
+      a hardcoded threshold of 5 and no parameter at all, so Experiment 1 could not be
+      demonstrated with one test call.
+
   ContactFlowErrorsThreshold:
     Type: Number
-    Default: 5
+    Default: 0
+    Description: >-
+      (Exp 2) Alarm threshold for AWS/Connect ContactFlowErrors, compared with
+      GreaterThanThreshold. Default 0 means a SINGLE flow error trips the alarm, which is
+      what makes the experiment demonstrable with one test call. A higher value is correct
+      for production monitoring but makes single-call testing impossible: one call produces
+      exactly one error, so a threshold of 5 can never be exceeded and no failover occurs
+      even though the fault is working correctly.
 
   LexCodeHookLatencyThresholdMs:
     Type: Number
@@ -1027,7 +1043,7 @@ Resources:
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 1
-      Threshold: 5
+      Threshold: !Ref LambdaErrorsThreshold
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 

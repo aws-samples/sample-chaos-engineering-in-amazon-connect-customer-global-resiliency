@@ -83,7 +83,7 @@ pre-flight checks, expected results, and the mandatory reset step between experi
 
 ### Experiment 1 — Lambda invocation failure
 FIS marks every `LexFulfillmentHandler` invocation as failed without running the code.
-- **Alarm:** `ConnectChaos-Lambda-Errors-{region}`
+- **Alarm:** `ConnectChaos-Lambda-Errors-{region}` (threshold `LambdaErrorsThreshold`, default `0` — one failed invocation is enough)
 - **⚠️ 180-second window** — see [Operational constraints](#operational-constraints).
 
 ### Experiment 2 — DynamoDB unreachable
@@ -91,7 +91,7 @@ FIS blocks both Lambda subnets from the DynamoDB endpoint at the network ACL. Th
 invokes `ConnectChaos-CallLogger` **directly** (a real audit write), so its DynamoDB failure
 takes the flow's Error branch and `ContactFlowErrors` increments on its own path rather than
 only riding the Lambda-Errors alarm.
-- **Alarm:** `ConnectChaos-ContactFlow-Errors-{region}`
+- **Alarm:** `ConnectChaos-ContactFlow-Errors-{region}` (threshold `ContactFlowErrorsThreshold`, default `0` — one flow error is enough)
 - **No 180 s window** — network-level, so the DynamoDB path is severed for the whole
   experiment. **This is the most reliable experiment to demo with a live call.**
 
@@ -214,7 +214,8 @@ FIS extension layer ARN. All are created or auto-resolved.
 | `ReplicatedLexBotId` / `…AliasId` | | `''` | Paired region only; from the primary stack outputs |
 | `EnableTrafficGenerator` | | `false` | Synthetic metrics — drive alarms without phone calls |
 | `DashboardType` | | `regional` | `regional` or `unified` |
-| `ContactFlowErrorsThreshold` | | `5` | Exp 2 |
+| `LambdaErrorsThreshold` | | `0` | Exp 1. `0` = one failed invocation trips the alarm; required for single-call testing |
+| `ContactFlowErrorsThreshold` | | `0` | Exp 2. `0` = one flow error trips the alarm. Raise both for production monitoring |
 | `LexCodeHookLatencyThresholdMs` | | `7000` | Exp 3 |
 | `QueueWaitSecondsThreshold` | | `60` | Exp 4 |
 | `FISExperimentDuration` | | `PT5M` | ISO-8601 |
