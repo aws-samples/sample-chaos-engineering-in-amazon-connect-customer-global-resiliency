@@ -672,11 +672,27 @@ parameters, so raising them for production monitoring is a deploy-time choice, a
 deploy` passes them through (`CONTACT_FLOW_ERRORS_THRESHOLD`, `LAMBDA_ERRORS_THRESHOLD`).
 No hardcoded numeric `Threshold` remains in the template.
 
+**Verified end-to-end after the fix (real call, IAD primary / PDX paired):**
+
+```
+18:43:05  ConnectChaos-ContactFlow-Errors-us-east-1  OK -> ALARM   (1.0 > 0.0)
+18:43:05  ConnectChaos-Composite-us-east-1                 -> ALARM
+18:43:06  TrafficShiftHandler invoked (EventBridge alarm state change)
+18:43:07  Traffic shifted: us-east-1=0%, us-west-2=100%
+          FIS experiment -> stopped, "Experiment halted by stop condition"
+```
+
+Alarm to failover was **two seconds**. Note the ~60–90 s lag between the call and the alarm:
+Connect publishes `ContactFlowErrors` on a delay, so checking `describe-alarms` immediately
+after hanging up shows `OK` and reads as a failure. Wait for the datapoint before concluding
+anything — `get-metric-data` on the alarm's own expression is the way to tell "no datapoint
+yet" apart from "datapoint present but not breaching".
+
 **Side effect: the FIS stop conditions become live.** Each experiment's stop condition is its
 *own* detection alarm (`AlarmLambdaErrors` guards Exp 1, `AlarmContactFlowErrors` guards
 Exp 2). At threshold `5` those guardrails were **inert** — a single-call demo could never
-trigger them. At `0` they work as designed: the experiment self-terminates the moment impact
-is detected, and the fault is withdrawn. Failover is unaffected, because the alarm state
+trigger them. At `0` they work as designed, as the run above confirms: the experiment
+self-terminates the moment impact is detected, and the fault is withdrawn. Failover is unaffected, because the alarm state
 change reaches EventBridge and the composite alarm independently of the experiment's
 lifecycle. Two practical consequences:
 
@@ -695,3 +711,59 @@ alarm names are unchanged, so the ARNs are unchanged and they are no-ops.
 while the first two were provably healthy, which is why it read as "the experiment does not
 work" rather than "the threshold is wrong". `describe-alarms` on the child alarm — not the
 composite — is the check that localises it in seconds.
+
+---
+
+## Fix 16 — The flow pinned the call-logger Lambda to the primary region
+
+**Symptom:** with traffic at `us-east-1 0% / us-west-2 100%`, a real inbound call was served by
+the paired region and the caller heard *"We are experiencing difficulties"*. The contact record
+existed in `us-west-2` (contact `4fdf3f91`, 19:21:35Z) and there was **no contact in
+`us-east-1`**, so ACGR routing was correct. But **neither region logged a Lambda invocation** —
+`us-west-2` had no `ConnectChaos-CallLogger` log group at all, and `us-east-1`'s log group had
+no entry for that contact. Nothing ran anywhere.
+
+**Root cause.** The MainIVR flow's `log-call` block was:
+
+```
+"LambdaFunctionARN":"${CallLoggerHandler.Arn}"
+```
+
+`!GetAtt ...Arn` resolves to a **primary-region** ARN. ACGR replicates flow *content* verbatim
+— the two flows were byte-identical, 3847 bytes each — so the `us-west-2` copy invoked the
+`us-east-1` function. A Connect instance can only invoke Lambda functions associated with
+*itself*, in its own region, so the block failed instantly and the flow took its Error branch
+before reaching Lex.
+
+This is precisely the defect Fix 8 corrected for the Lex alias ARN, **in the same flow**, missed
+for Lambda. The Lex ARN already used `$.AwsRegion`, which is why Lex was never implicated.
+
+**Fix:**
+
+```
+"LambdaFunctionARN":"arn:aws:lambda:$.AwsRegion:${AWS::AccountId}:function:${CallLoggerHandler}"
+```
+
+Per the
+[ACGR requirements](https://docs.aws.amazon.com/connect/latest/adminguide/connect-global-resiliency-requirements.html),
+`$.AwsRegion` is supported for **exactly two things — Lambda ARNs and Lex ARNs** — and requires
+the function to have the **same name in every region**. The template pins
+`FunctionName: ConnectChaos-CallLogger`, so this holds; the fix script asserts it, because
+letting CloudFormation auto-name that function would silently reintroduce the bug.
+
+Note `${CallLoggerHandler}` is a `Ref` (the function *name*), not `GetAtt ...Arn`. The
+`CallLoggerAssociation` resource keeps the concrete regional ARN — it is a control-plane API
+call, not flow content, and must name a real function in its own region.
+
+**Why it went unnoticed for so long.** Every previous verification of this sample confirmed
+that traffic *shifted*. None confirmed that the destination region could *serve a call* — the
+one check that distinguishes "failover worked" from "failover moved traffic to a region that
+cannot answer". This is the failure mode the sample exists to teach, and the sample itself had
+it. `docs` already listed this as an open verification item rather than claiming it was proven,
+which is the only reason it was not stated as a false fact.
+
+**Related gap in the same area (fixed operationally, not yet in the template):**
+`LexBotAssociation` is `Condition: IsPrimaryRegion`, so a fresh deploy never associates the
+replicated bot alias with the *paired* instance. The paired region's `list-bots` is empty and
+its flow cannot reach Lex even with a healthy replica. This needs to move into
+`make post-deploy`, because it can only run once the Lex GR replica exists.
