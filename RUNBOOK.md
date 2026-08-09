@@ -189,6 +189,40 @@ aws lambda list-functions --region $PAIRED_REGION \
 
 ---
 
+## 2b. Point the phone number at the contact flow  ⚠️ REQUIRED
+
+**This is a silent failure if skipped.** Every stack resource reports `CREATE_COMPLETE`,
+every alarm reports `OK`, and calls simply never enter the flow — nothing indicates why.
+
+CloudFormation cannot do it: the number belongs to the Traffic Distribution Group, not to
+the stack, and there is no CloudFormation resource for the number → flow link.
+
+```bash
+make post-deploy STACK=$STACK \
+  PRIMARY_REGION=$PRIMARY_REGION PAIRED_REGION=$PAIRED_REGION \
+  INSTANCE_ID=$INSTANCE_ID TDG_ID=$TDG_ID
+```
+
+`post-deploy` does all three manual steps and is safe to re-run: seeds the tables,
+associates the number with **`ConnectChaos-MainIVR`**, and resets traffic to
+100% primary / 0% paired.
+
+Then confirm the environment before spending any calls:
+
+```bash
+make verify STACK=$STACK PRIMARY_REGION=$PRIMARY_REGION \
+  PAIRED_REGION=$PAIRED_REGION TDG_ID=$TDG_ID
+```
+
+`verify` checks both stacks, whether the paired region can actually serve a call, the seed
+data, the traffic split and the alarms. It cannot check the number → flow link itself —
+**no AWS API exposes it** — so the baseline call below is the only real proof of that.
+
+> Experiment 4 uses a **different** flow (`ConnectChaos-ChaosTest`). Re-point the number for
+> that test, then point it back. See Experiment 4.
+
+---
+
 ## 3. Seed data and baseline
 
 ```bash

@@ -502,3 +502,67 @@ Not yet proven on real telephony:
 3. **Fix 11** — that a VPC-attached Lambda writes CloudWatch Logs through only DynamoDB and
    S3 gateway endpoints. If logs are missing after the first deploy, add a CloudWatch Logs
    interface endpoint (~$7/month/AZ). This was deliberately not added speculatively.
+
+---
+
+## Fix 14 — `AWS::Lex::Bot` `Replication` did not leave a persistent GR replica
+
+**Symptom:** immediately after `make deploy-pair`, bot `QJ5VLLR4GH` was visible in the paired
+region via `list-bots` with status `Available`, and the paired stack's
+`AWS::Connect::IntegrationAssociation` (which references the replicated bot alias ARN)
+created successfully — so the replica demonstrably existed. Roughly forty minutes later the
+bot was **gone** from the paired region and the authoritative API reported no replica at all:
+
+```
+$ aws lexv2-models list-bot-replicas --bot-id QJ5VLLR4GH --region us-east-1
+{ "botId": "QJ5VLLR4GH", "sourceRegion": "us-east-1", "botReplicaSummaries": [] }
+```
+
+This is the worst class of failure this sample can have: every stack resource reported
+`CREATE_COMPLETE`, every alarm reported `OK`, and a failover would have shifted traffic to a
+region whose contact flow had **no reachable Lex bot**.
+
+**What was ruled out:**
+
+- `EnableLexGlobalResiliency` was `true` on the deployed stack.
+- The deployed template did carry the `Replication` block (confirmed via
+  `cloudformation get-template`), so the intent reached CloudFormation.
+- CloudTrail showed **zero** `CreateBotReplica`, `DeleteBotReplica` or `DeleteBot` events in
+  either region over the relevant window — so nothing recorded creating *or* removing it.
+- Lex GR itself is fully functional in this account, proven below.
+
+**Root cause: not established.** The replica lifecycle left no CloudTrail trail, so the
+disappearance cannot be attributed with the evidence available. It is recorded here as an
+observed behaviour rather than an explained one.
+
+**Remediation that worked.** Creating the replica explicitly succeeded immediately and
+persisted:
+
+```bash
+aws lexv2-models create-bot-replica --bot-id <botId> --replica-region <paired> --region <primary>
+#   botReplicaStatus: Enabling  ->  Enabled   (within ~30 s)
+```
+
+Note that the **bot** replica becoming `Enabled` is not sufficient. The bot **alias** replica
+is created separately and lags:
+
+```
+IYOEXZUVAZ | Creating  | v0000000001     <- ~90 s
+IYOEXZUVAZ | Available | v0000000001
+```
+
+The contact flow's `$.AwsRegion` Lex ARN resolves to the **alias**, so the paired region
+cannot serve a call until the *alias* replica is `Available` — not merely the bot.
+
+Preconditions confirmed present before replication would work: a numbered bot version
+(`1`, not just `DRAFT`) and an alias pointing at it.
+
+**Consequence for the sample.** Do not treat `Replication` in the template as sufficient
+evidence that the paired region is usable. `make verify` now checks this explicitly, in both
+Lex modes, and reports the replica count. It was this check that caught the regression —
+before any test call was spent on it.
+
+**Follow-up worth doing:** determine whether the `Replication` property reliably establishes
+a *durable* replica, or whether an explicit `create-bot-replica` should be part of
+`post-deploy`. Until that is known, always run `make verify` after deploying and re-check it
+before a failover demonstration.

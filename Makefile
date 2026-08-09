@@ -29,7 +29,7 @@ ZIPS    := $(addprefix $(BUILD_DIR)/,$(addsuffix .zip,$(LAMBDAS)))
 all: package
 
 help:
-	@echo "Targets: package, upload, deploy, clean, lint, help"
+	@echo "Targets: package, bucket, bootstrap, deploy, deploy-pair, post-deploy, verify, lint, clean, help"
 	@grep -E '^# {2,}make' Makefile | sed 's/^# //'
 
 $(BUILD_DIR):
@@ -118,6 +118,151 @@ deploy-pair:
 	  aws cloudformation describe-stacks --stack-name $(STACK) --region $$R \
 	    --query "Stacks[0].StackStatus" --output text; \
 	done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# post-deploy: the three steps CloudFormation cannot do for you.
+#
+# The template cannot own the phone-number -> contact-flow association: the number
+# belongs to the Traffic Distribution Group, not to the stack, and there is no
+# CloudFormation resource for that link. Skipping it is a SILENT failure - every
+# stack resource reports CREATE_COMPLETE, every alarm reports OK, and calls never
+# reach the flow.
+#
+# Idempotent: safe to re-run.
+# ─────────────────────────────────────────────────────────────────────────────
+.PHONY: post-deploy verify
+
+post-deploy:
+	@set -e; \
+	if [ -z "$(STACK)" ] || [ -z "$(PRIMARY_REGION)" ] || [ -z "$(PAIRED_REGION)" ] \
+	   || [ -z "$(INSTANCE_ID)" ] || [ -z "$(TDG_ID)" ]; then \
+	  echo "Required: STACK PRIMARY_REGION PAIRED_REGION INSTANCE_ID TDG_ID"; \
+	  echo "Optional: PHONE_NUMBER_ID (otherwise resolved from the TDG)"; \
+	  exit 2; \
+	fi; \
+	echo "=== 1/3 seeding DynamoDB ==="; \
+	aws dynamodb put-item --table-name $(STACK)-Customers --region $(PRIMARY_REGION) \
+	  --item '{"account_id":{"S":"12345"},"customer_name":{"S":"John Doe"}}'; \
+	aws dynamodb put-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
+	  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'; \
+	echo "    seeded $(STACK)-Customers (account 12345) and $(STACK)-Config (chaos_flag=false)"; \
+	echo "=== 2/3 associating the phone number with ConnectChaos-MainIVR ==="; \
+	FLOW=$$(aws connect list-contact-flows --instance-id $(INSTANCE_ID) \
+	         --region $(PRIMARY_REGION) \
+	         --query "ContactFlowSummaryList[?Name=='ConnectChaos-MainIVR'].Id | [0]" \
+	         --output text); \
+	if [ -z "$$FLOW" ] || [ "$$FLOW" = "None" ]; then \
+	  echo "ERROR: contact flow ConnectChaos-MainIVR not found in $(PRIMARY_REGION)."; \
+	  echo "       Did the primary stack finish deploying?"; exit 1; \
+	fi; \
+	echo "    flow ConnectChaos-MainIVR = $$FLOW"; \
+	PN="$(PHONE_NUMBER_ID)"; \
+	if [ -z "$$PN" ]; then \
+	  echo "    resolving the number attached to TDG $(TDG_ID)..."; \
+	  PN=$$(aws connect list-phone-numbers-v2 --region $(PRIMARY_REGION) --max-results 100 \
+	        --query "ListPhoneNumbersSummaryList[?contains(TargetArn,'$(TDG_ID)')].PhoneNumberId" \
+	        --output text); \
+	  COUNT=$$(echo $$PN | wc -w | tr -d ' '); \
+	  if [ "$$COUNT" = "0" ]; then \
+	    echo "ERROR: no phone number is attached to TDG $(TDG_ID)."; \
+	    echo "       ACGR needs a PORTED number claimed to the TDG."; exit 1; \
+	  fi; \
+	  if [ "$$COUNT" != "1" ]; then \
+	    echo "ERROR: $$COUNT numbers are attached to that TDG: $$PN"; \
+	    echo "       Re-run with PHONE_NUMBER_ID=<one of them>"; exit 1; \
+	  fi; \
+	fi; \
+	echo "    phone-number-id = $$PN"; \
+	aws connect associate-phone-number-contact-flow --phone-number-id $$PN \
+	  --instance-id $(INSTANCE_ID) --contact-flow-id $$FLOW --region $(PRIMARY_REGION); \
+	echo "    associated"; \
+	echo "=== 3/3 resetting traffic to 100% primary / 0% paired ==="; \
+	aws connect update-traffic-distribution --id $(TDG_ID) --region $(PRIMARY_REGION) \
+	  --telephony-config '{"Distributions":[{"Region":"$(PRIMARY_REGION)","Percentage":100},{"Region":"$(PAIRED_REGION)","Percentage":0}]}'; \
+	aws connect get-traffic-distribution --id $(TDG_ID) --region $(PRIMARY_REGION) \
+	  --query "TelephonyConfig.Distributions[].[Region,Percentage]" --output text; \
+	echo "=== post-deploy complete - run 'make verify' next ==="
+
+# ─────────────────────────────────────────────────────────────────────────────
+# verify: preflight before testing. Reports PASS/FAIL per check.
+# Honest limitation: there is no AWS API that returns the contact flow a phone
+# number is associated with, so that link cannot be asserted here. `post-deploy`
+# sets it; a baseline call is the only real proof.
+# ─────────────────────────────────────────────────────────────────────────────
+verify:
+	@set -e; \
+	if [ -z "$(STACK)" ] || [ -z "$(PRIMARY_REGION)" ] || [ -z "$(PAIRED_REGION)" ] \
+	   || [ -z "$(TDG_ID)" ]; then \
+	  echo "Required: STACK PRIMARY_REGION PAIRED_REGION TDG_ID"; exit 2; \
+	fi; \
+	FAIL=0; \
+	echo "=== stacks ==="; \
+	for R in $(PRIMARY_REGION) $(PAIRED_REGION); do \
+	  S=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $$R \
+	       --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo MISSING); \
+	  case "$$S" in CREATE_COMPLETE|UPDATE_COMPLETE) echo "  PASS  $$R $$S";; \
+	    *) echo "  FAIL  $$R $$S"; FAIL=1;; esac; \
+	done; \
+	echo "=== Lex: can the paired region serve a call? ==="; \
+	PBOT=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $(PRIMARY_REGION) \
+	       --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue" --output text 2>/dev/null); \
+	SBOT=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $(PAIRED_REGION) \
+	       --query "Stacks[0].Outputs[?OutputKey=='LexBotId'].OutputValue" --output text 2>/dev/null); \
+	if [ -n "$$SBOT" ] && [ "$$SBOT" != "None" ]; then \
+	  echo "    mode: PER-REGION bots (Lex GR off)"; \
+	  ST=$$(aws lexv2-models list-bots --region $(PAIRED_REGION) \
+	        --query "botSummaries[?botId=='$$SBOT'].botStatus | [0]" --output text 2>/dev/null); \
+	  if [ "$$ST" = "Available" ]; then echo "  PASS  paired region owns bot $$SBOT ($$ST)"; \
+	    echo "  NOTE  bot ids differ by design, so the flow's \$$.AwsRegion token is NOT"; \
+	    echo "        sufficient - scripts/wire-paired-flow.sh must have been run"; \
+	  else echo "  FAIL  paired bot $$SBOT not Available (got '$$ST')"; FAIL=1; fi; \
+	else \
+	  echo "    mode: LEX GLOBAL RESILIENCY (same bot id expected in both regions)"; \
+	  REPL=$$(aws lexv2-models list-bot-replicas --bot-id $$PBOT --region $(PRIMARY_REGION) \
+	          --query "length(botReplicaSummaries)" --output text 2>/dev/null || echo 0); \
+	  ST=$$(aws lexv2-models list-bots --region $(PAIRED_REGION) \
+	        --query "botSummaries[?botId=='$$PBOT'].botStatus | [0]" --output text 2>/dev/null); \
+	  if [ "$$ST" = "Available" ]; then echo "  PASS  bot $$PBOT Available in $(PAIRED_REGION) (replicas reported: $$REPL)"; \
+	  else \
+	    echo "  FAIL  bot $$PBOT is NOT in $(PAIRED_REGION) (status '$$ST', replicas $$REPL)"; \
+	    echo "        The paired region CANNOT serve a call - a failover would move traffic"; \
+	    echo "        to a region whose contact flow has no reachable Lex bot."; \
+	    echo "        Fix: redeploy both regions with ENABLE_LEX_GR=false and then run"; \
+	    echo "             scripts/wire-paired-flow.sh"; FAIL=1; \
+	  fi; \
+	fi; \
+	echo "=== seed data ==="; \
+	C=$$(aws dynamodb get-item --table-name $(STACK)-Customers --region $(PRIMARY_REGION) \
+	     --key '{"account_id":{"S":"12345"}}' --query "Item.customer_name.S" --output text 2>/dev/null); \
+	if [ "$$C" = "None" ] || [ -z "$$C" ]; then echo "  FAIL  customer 12345 missing - run 'make post-deploy'"; FAIL=1; \
+	else echo "  PASS  customer 12345 = $$C"; fi; \
+	F=$$(aws dynamodb get-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
+	     --key '{"config_key":{"S":"chaos_flag"}}' --query "Item.enabled.BOOL" --output text 2>/dev/null); \
+	if [ "$$F" = "False" ]; then echo "  PASS  chaos_flag = false (healthy)"; \
+	elif [ "$$F" = "True" ]; then echo "  FAIL  chaos_flag is TRUE - Exp 4 is still armed"; FAIL=1; \
+	else echo "  FAIL  chaos_flag missing - run 'make post-deploy'"; FAIL=1; fi; \
+	echo "=== traffic distribution ==="; \
+	P=$$(aws connect get-traffic-distribution --id $(TDG_ID) --region $(PRIMARY_REGION) \
+	     --query "TelephonyConfig.Distributions[?Region=='$(PRIMARY_REGION)'].Percentage | [0]" --output text); \
+	if [ "$$P" = "100" ]; then echo "  PASS  $(PRIMARY_REGION) at 100%"; \
+	else echo "  FAIL  $(PRIMARY_REGION) at $$P% - not a clean baseline, run 'make post-deploy'"; FAIL=1; fi; \
+	echo "=== alarms ==="; \
+	A=$$(aws cloudwatch describe-alarms --region $(PRIMARY_REGION) --alarm-name-prefix ConnectChaos- \
+	     --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text); \
+	if [ -z "$$A" ]; then echo "  PASS  no component alarm in ALARM"; \
+	else echo "  FAIL  still in ALARM: $$A"; FAIL=1; fi; \
+	echo "=== phone number ==="; \
+	N=$$(aws connect list-phone-numbers-v2 --region $(PRIMARY_REGION) --max-results 100 \
+	     --query "ListPhoneNumbersSummaryList[?contains(TargetArn,'$(TDG_ID)')].PhoneNumber" --output text); \
+	if [ -z "$$N" ]; then echo "  FAIL  no number attached to TDG $(TDG_ID)"; FAIL=1; \
+	else echo "  PASS  number(s) on the TDG: $$N"; \
+	     echo "  NOTE  AWS exposes no API for the number -> contact flow link, so that"; \
+	     echo "        cannot be asserted here. 'make post-deploy' sets it; the baseline"; \
+	     echo "        call is the only real proof."; fi; \
+	echo; \
+	if [ "$$FAIL" = "0" ]; then echo "ALL CHECKS PASSED - ready to test (RUNBOOK step 3a)"; \
+	else echo "SOME CHECKS FAILED - fix the above before testing"; exit 1; fi
+
 
 lint:
 	# W1030 is expected: ReplicatedLexBot* params are intentionally empty in

@@ -171,6 +171,26 @@ operator can confirm the fault is genuinely resolved first. See Step R in the ru
 5. Ensure Lambda functions have the **same name across regions** and that flows avoid
    hardcoded regions — both handled by this template.
 
+### Required after deploying
+
+`make deploy-pair` creates all the infrastructure but three steps remain, because
+CloudFormation cannot perform them. Run:
+
+```bash
+make post-deploy STACK=<stack> PRIMARY_REGION=<r1> PAIRED_REGION=<r2> \
+  INSTANCE_ID=<connect-instance-id> TDG_ID=<tdg-id>
+make verify      STACK=<stack> PRIMARY_REGION=<r1> PAIRED_REGION=<r2> TDG_ID=<tdg-id>
+```
+
+| Step | Why CloudFormation cannot do it |
+|---|---|
+| Seed the DynamoDB tables | Data, not infrastructure |
+| **Associate the number with `ConnectChaos-MainIVR`** | The number belongs to the TDG, not the stack, and no CloudFormation resource models the number → flow link |
+| Reset traffic to 100/0 | Live routing state |
+
+> **The association is a silent failure if skipped** — every resource reads
+> `CREATE_COMPLETE`, every alarm reads `OK`, and calls never reach the flow.
+
 **You do NOT need to pre-create:** a VPC, subnets, a security group, an S3 bucket, or the
 FIS extension layer ARN. All are created or auto-resolved.
 
