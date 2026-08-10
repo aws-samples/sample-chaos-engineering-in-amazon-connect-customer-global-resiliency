@@ -22,6 +22,12 @@ BUILD_DIR  := build
 TEMPLATE   := cfn/main-template.yaml
 
 LAMBDAS := lex_fulfillment_handler traffic_shift_handler traffic_generator call_logger account_lookup
+
+# Content hash of the handler SOURCES. Goes into the S3 key of every function so that a code
+# change necessarily changes Code.S3Key and CloudFormation updates the function. Hashing the
+# sources, not the zips: zip archives embed timestamps, so hashing them would change the key
+# on every build even with identical code. See FIXES.md Fix 21.
+LAMBDA_CODE_VERSION := $(shell cat $(LAMBDA_DIR)/*.py | shasum | cut -c1-12)
 ZIPS    := $(addprefix $(BUILD_DIR)/,$(addsuffix .zip,$(LAMBDAS)))
 
 .PHONY: all package upload deploy clean lint flows help
@@ -69,11 +75,11 @@ bucket:
 	fi
 
 upload: package bucket
-	aws s3 cp $(BUILD_DIR)/lex_fulfillment_handler.zip s3://$(BUCKET)/connect-chaos/ --region $(REGION)
-	aws s3 cp $(BUILD_DIR)/traffic_shift_handler.zip   s3://$(BUCKET)/connect-chaos/ --region $(REGION)
-	aws s3 cp $(BUILD_DIR)/traffic_generator.zip       s3://$(BUCKET)/connect-chaos/ --region $(REGION)
-	aws s3 cp $(BUILD_DIR)/call_logger.zip             s3://$(BUCKET)/connect-chaos/ --region $(REGION)
-	aws s3 cp $(BUILD_DIR)/account_lookup.zip           s3://$(BUCKET)/connect-chaos/ --region $(REGION)
+	aws s3 cp $(BUILD_DIR)/lex_fulfillment_handler.zip s3://$(BUCKET)/connect-chaos/$(LAMBDA_CODE_VERSION)/ --region $(REGION)
+	aws s3 cp $(BUILD_DIR)/traffic_shift_handler.zip   s3://$(BUCKET)/connect-chaos/$(LAMBDA_CODE_VERSION)/ --region $(REGION)
+	aws s3 cp $(BUILD_DIR)/traffic_generator.zip       s3://$(BUCKET)/connect-chaos/$(LAMBDA_CODE_VERSION)/ --region $(REGION)
+	aws s3 cp $(BUILD_DIR)/call_logger.zip             s3://$(BUCKET)/connect-chaos/$(LAMBDA_CODE_VERSION)/ --region $(REGION)
+	aws s3 cp $(BUILD_DIR)/account_lookup.zip           s3://$(BUCKET)/connect-chaos/$(LAMBDA_CODE_VERSION)/ --region $(REGION)
 
 # One-shot preparation for a region: bucket + zips uploaded.
 bootstrap: upload
@@ -118,6 +124,7 @@ deploy: bootstrap
 	    EnableTrafficGenerator=$(or $(ENABLE_TRAFFIC_GEN),true) \
 	    DashboardType=$(or $(DASHBOARD_TYPE),regional) \
 	    ContactFlowErrorsThreshold=$(or $(CONTACT_FLOW_ERRORS_THRESHOLD),0) \
+	    LambdaCodeVersion=$(LAMBDA_CODE_VERSION) \
 	    ReplicatedLexBotId=$(REPLICATED_LEX_BOT_ID) \
 	    ReplicatedLexBotAliasId=$(REPLICATED_LEX_BOT_ALIAS_ID)
 
@@ -420,6 +427,21 @@ verify:
 	    if [ -z "$$BAD" ]; then echo "  PASS  $$R/$$FN"; \
 	    else echo "  FAIL  $$R/$$FN:$$BAD"; FAIL=1; fi; \
 	  done; \
+	done; \
+	echo "=== handlers: do they actually load? (import-time failures are invisible elsewhere) ==="; \
+	for R in $(PRIMARY_REGION) $(PAIRED_REGION); do \
+	  OUT=$$(aws lambda invoke --function-name ConnectChaos-TrafficShiftHandler --region $$R \
+	         --cli-binary-format raw-in-base64-out \
+	         --payload '{"detail-type":"CloudWatch Alarm State Change","detail":{"state":{"value":"OK"}}}' \
+	         /dev/null --query FunctionError --output text 2>/dev/null); \
+	  if [ "$$OUT" = "None" ] || [ -z "$$OUT" ]; then \
+	    echo "  PASS  $$R: TrafficShiftHandler loads and runs"; \
+	  else \
+	    echo "  FAIL  $$R: TrafficShiftHandler returned $$OUT - it cannot even import."; \
+	    echo "        Almost certainly STALE CODE: CloudFormation does not update a"; \
+	    echo "        function whose Code.S3Key is unchanged. See FIXES.md Fix 21."; \
+	    FAIL=1; \
+	  fi; \
 	done; \
 	echo "=== seed data ==="; \
 	C=$$(aws dynamodb get-item --table-name $(STACK)-Customers --region $(PRIMARY_REGION) \

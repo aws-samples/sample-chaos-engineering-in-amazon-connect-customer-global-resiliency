@@ -1123,3 +1123,89 @@ the **fault**, the **metric** and the **alarm** as three separate steps — with
 for extension-based faults, verify the extension can *fetch its configuration* before trusting
 any experiment result. The line to look for is `no active faults found`; anything else means
 the fault will not be applied.
+
+---
+
+## Fix 21 — CloudFormation shipped stale Lambda code, silently breaking all failover
+
+**Symptom:** a real Experiment 1 call heard *"Welcome back, John Doe"* instead of the failure
+prompt. Forcing the child alarm into `ALARM` by hand proved the alarm and EventBridge were
+fine — `TriggeredRules: 1`, `Invocations: 1`, `FailedInvocations: none` — yet traffic never
+moved and the handler's log group appeared empty to `filter_log_events`. Reading the log
+**stream** directly showed the truth:
+
+```
+[ERROR] KeyError: 'TRAFFIC_DISTRIBUTION_GROUP_ID'
+INIT_REPORT  Init Duration: 399.52 ms  Phase: init  Status: error  Error Type: Runtime.Unknown
+```
+
+**Root cause.** Fix 17 renamed that environment variable to `..._ARN`. CloudFormation applied
+the environment change and **left the function code at the previous version**, because
+`Code.S3Key` was a fixed path — `connect-chaos/traffic_shift_handler.zip`. The zip *bytes* in
+S3 were replaced by `make deploy`, but the *property value* did not change, so CloudFormation
+compared old to new, saw no difference, and skipped the code update. The result was code and
+configuration that disagreed: the deployed code read a variable that no longer existed, so it
+raised at **import**, before the handler ran.
+
+**Blast radius: every failover, in both regions, for the entire period after the Fix 17/18
+deploy.** And it was invisible to everything:
+
+```
+both stacks           UPDATE_COMPLETE
+all alarms            OK
+make verify           ALL CHECKS PASSED
+EventBridge           rule matched, Lambda invoked, no FailedInvocations
+baseline phone call    succeeded end to end
+```
+
+Only two things exposed it: reading the handler's log stream directly, and the traffic
+distribution simply not changing.
+
+**Immediate remediation:** `aws lambda update-function-code` for all functions in both
+regions. Only `TrafficShiftHandler` reported `CHANGED`; `AccountLookup` was newly created so
+its code was fresh, and the other two were untouched in that release — which is exactly why
+this went unnoticed. The bug only bites a function whose **code changed while its S3 key did
+not**.
+
+**Durable fix: content-address the S3 keys.**
+
+```
+LAMBDA_CODE_VERSION := $(shell cat $(LAMBDA_DIR)/*.py | shasum | cut -c1-12)
+S3Key: !Sub 'connect-chaos/${LambdaCodeVersion}/traffic_shift_handler.zip'
+```
+
+Any handler edit changes the hash, which changes `Code.S3Key`, which obliges CloudFormation to
+update the code. Hashing the **sources** and not the zips is deliberate: zip archives embed
+timestamps, so hashing the archives would change the key on every build even when nothing
+changed, producing pointless updates and hiding real ones in the noise.
+
+**New check in `make verify`:** invoke `TrafficShiftHandler` with a synthetic **non-ALARM**
+event and assert no `FunctionError`. The handler returns early for any state that is not
+`ALARM`, so the probe exercises module import and the entrypoint without touching the traffic
+distribution. It reports the stale-code diagnosis by name:
+
+```
+=== handlers: do they actually load? (import-time failures are invisible elsewhere) ===
+  PASS  us-east-1: TrafficShiftHandler loads and runs
+  PASS  us-west-2: TrafficShiftHandler loads and runs
+```
+
+**Verified after the fix**, by forcing each region's child alarm:
+
+```
+us-east-1 forced ALARM -> traffic us-east-1=0 / us-west-2=100   in 4s
+us-west-2 forced ALARM -> traffic us-west-2=0 / us-east-1=100   in 4s   <- Fix 17 proven
+```
+
+The second line is the first time the paired region has ever driven the TDG.
+
+**Two lessons.**
+
+`set-alarm-state` on a child alarm is the right way to test the failover half. It exercises
+composite evaluation, EventBridge, the Lambda and `UpdateTrafficDistribution` in about four
+seconds, with no phone call, no experiment and no 180-second window — so the *fault* and the
+*failover* can be verified independently instead of racing to observe both in one call.
+
+`filter_log_events` returned nothing for a log group that visibly had recent events in
+`describe_log_streams`. When a Lambda looks silent but should not be, read the stream with
+`get_log_events` before concluding it was never invoked.

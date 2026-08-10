@@ -112,6 +112,17 @@ Parameters:
       x86_64 extension for this region automatically.
     Default: /aws/service/fis/lambda-extension/AWS-FIS-extension-x86_64/1.x.x
 
+  LambdaCodeVersion:
+    Type: String
+    Default: v1
+    Description: >-
+      Content hash of lambda/*.py, supplied by 'make deploy'. It is part of every function's
+      Code.S3Key so that changing any handler changes the S3Key, which is what obliges
+      CloudFormation to update the function code. With a FIXED key, CloudFormation compares
+      only the property value, sees no change, and leaves the OLD code deployed even though
+      the object in S3 was replaced - shipping code and configuration that disagree. That
+      failure is silent: the stack reports UPDATE_COMPLETE. See FIXES.md Fix 21.
+
   ContactFlowErrorsThreshold:
     Type: Number
     Default: 0
@@ -999,7 +1010,7 @@ Resources:
       MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: connect-chaos/lex_fulfillment_handler.zip
+        S3Key: !Sub 'connect-chaos/${LambdaCodeVersion}/lex_fulfillment_handler.zip'
       Layers:
         - !Ref FISExtensionLayerArn
       Environment:
@@ -1056,7 +1067,7 @@ Resources:
       MemorySize: 128
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: connect-chaos/call_logger.zip
+        S3Key: !Sub 'connect-chaos/${LambdaCodeVersion}/call_logger.zip'
       Environment:
         Variables:
           CALL_LOG_TABLE_NAME: !Sub '${AWS::StackName}-CallLog'
@@ -1096,7 +1107,7 @@ Resources:
       MemorySize: 128
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: connect-chaos/account_lookup.zip
+        S3Key: !Sub 'connect-chaos/${LambdaCodeVersion}/account_lookup.zip'
       Layers:
         # Required for Experiment 1: the FIS extension is what applies invocation-error.
         - !Ref FISExtensionLayerArn
@@ -1164,7 +1175,7 @@ Resources:
       MemorySize: 128
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: connect-chaos/traffic_shift_handler.zip
+        S3Key: !Sub 'connect-chaos/${LambdaCodeVersion}/traffic_shift_handler.zip'
       Environment:
         Variables:
           # MUST be the full ARN, not the bare UUID. A TDG resolves by bare ID only in the
@@ -1491,7 +1502,7 @@ Resources:
       MemorySize: 128
       Code:
         S3Bucket: !Ref LambdaCodeBucket
-        S3Key: connect-chaos/traffic_generator.zip
+        S3Key: !Sub 'connect-chaos/${LambdaCodeVersion}/traffic_generator.zip'
       Environment:
         Variables:
           CONNECT_INSTANCE_ID: !Ref ConnectInstanceId
