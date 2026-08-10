@@ -307,15 +307,27 @@ Measured on this sample, not estimated:
 
 | Step | Delay |
 |---|---|
-| `start-experiment` -> fault actually effective (Exps 1 and 3) | **~60-80 s** |
-| Fault persistence | intermittent; ~20-30 s lapses |
+| `start-experiment` -> fault actually effective (Exps 1 and 3) | **~55 s** |
+| Fault persistence | continuous once applied (see Fix 24) |
 | Exp 2 fault | immediate, never expires |
 | Call -> `ContactFlowErrors` published | ~60-90 s |
 | Alarm -> traffic shifted | **`FailoverDelaySeconds`** (default 120 s) + ~2 s |
 
-So a full Experiment 1 cycle is roughly: start, wait ~85 s, call, wait ~90 s for the alarm,
+So a full Experiment 1 cycle is roughly: start, wait ~60 s, call, wait ~90 s for the alarm,
 then a further ~120 s dwell before traffic moves. Do not conclude anything is broken before
 about four minutes have passed.
+
+**Never start an experiment while its stop-condition alarm is in `ALARM`.** FIS fails the
+experiment within ten seconds:
+
+```
+Error while handling stop condition for experiment: EXP...
+The following alarms were not in state OK: [...ConnectChaos-Exp3-Latency-us-east-1]
+```
+
+This is exactly what Step R's alarm wait prevents, so always let `make reset` finish. Note the
+Exp 3 alarm watches Lambda `Duration` on the code hook, so a diagnostic probe of that function
+trips it for real — unlike an Exp 1 probe, which cannot (FIXES.md Fix 24).
 
 Two consequences worth knowing:
 

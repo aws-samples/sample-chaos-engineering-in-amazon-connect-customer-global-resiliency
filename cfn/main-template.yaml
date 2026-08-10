@@ -1041,6 +1041,21 @@ Resources:
           CHAOS_TABLE_NAME: !Sub '${AWS::StackName}-Config'
           AWS_FIS_CONFIGURATION_LOCATION: !Sub '${FISConfigBucket.Arn}/FisConfigs/'
           AWS_LAMBDA_EXEC_WRAPPER: /opt/aws-fis/bootstrap
+          # Without this, a fault silently never applies to a WARM container. The extension's
+          # polling thread cannot finish inside an invocation shorter than ~70 ms (these
+          # handlers run 57-290 ms), so it never obtains the fault config; only cold starts,
+          # which poll during INIT, were affected. Measured: warm 0.7 s vs cold 32.9 s under an
+          # active 31 s delay fault. This makes the extension wait for an in-flight poll before
+          # starting the function. See FIXES.md Fix 24.
+          AWS_FIS_POLL_MAX_WAIT_MILLISECONDS: '3000'
+          # Default is 60 s, which is most of the delay between start-experiment and the
+          # fault taking effect. 20 is the MINIMUM the extension accepts: it validates that the
+          # cold-polling interval is >= the hot-polling interval (20 s). A smaller value is
+          # rejected and silently falls back to 60 s, logging
+          #   "Validation: cold-polling interval must be greater or equal to hot-polling
+          #    interval (20)"
+          # which is easy to miss. See FIXES.md Fix 24.
+          AWS_FIS_SLOW_POLL_INTERVAL_SECONDS: '20'
       VpcConfig:
         SubnetIds:
           - !If [MakeVpc, !Ref ChaosSubnetA, !Ref LambdaSubnetIdA]
@@ -1138,6 +1153,21 @@ Resources:
           CUSTOMER_TABLE_NAME: !Sub '${AWS::StackName}-Customers'
           AWS_FIS_CONFIGURATION_LOCATION: !Sub '${FISConfigBucket.Arn}/FisConfigs/'
           AWS_LAMBDA_EXEC_WRAPPER: /opt/aws-fis/bootstrap
+          # Without this, a fault silently never applies to a WARM container. The extension's
+          # polling thread cannot finish inside an invocation shorter than ~70 ms (these
+          # handlers run 57-290 ms), so it never obtains the fault config; only cold starts,
+          # which poll during INIT, were affected. Measured: warm 0.7 s vs cold 32.9 s under an
+          # active 31 s delay fault. This makes the extension wait for an in-flight poll before
+          # starting the function. See FIXES.md Fix 24.
+          AWS_FIS_POLL_MAX_WAIT_MILLISECONDS: '3000'
+          # Default is 60 s, which is most of the delay between start-experiment and the
+          # fault taking effect. 20 is the MINIMUM the extension accepts: it validates that the
+          # cold-polling interval is >= the hot-polling interval (20 s). A smaller value is
+          # rejected and silently falls back to 60 s, logging
+          #   "Validation: cold-polling interval must be greater or equal to hot-polling
+          #    interval (20)"
+          # which is easy to miss. See FIXES.md Fix 24.
+          AWS_FIS_SLOW_POLL_INTERVAL_SECONDS: '20'
       VpcConfig:
         SubnetIds:
           - !If [MakeVpc, !Ref ChaosSubnetA, !Ref LambdaSubnetIdA]

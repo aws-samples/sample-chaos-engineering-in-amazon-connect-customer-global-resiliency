@@ -1325,3 +1325,96 @@ timing. Any state read *before* a wait may be stale after it, so every precondit
 re-evaluated on the far side — and the precondition that matters is the *triggering condition*,
 not the side effect you were about to write. The first version of this fix re-checked the
 side effect and was still wrong.
+
+---
+
+## Fix 24 — Experiment 3 only ever worked on a cold start, and three FIS behaviours nobody documents together
+
+**Symptom:** a real Experiment 3 call reached the right flow — the caller heard *"Experiment
+three, speech latency"* — but the account lookup succeeded every time. No delay, no alarm, no
+failover. The extension even logged `found active faults`:
+
+```
+18:00:49  FIS EXTENSION - found active faults (updated polling interval 20s)
+18:00:49  REPORT Duration=187.61 ms       <- fault active, yet no delay
+18:01:58  REPORT Duration=57.82 ms
+```
+
+A controlled test isolated it immediately:
+
+```
+warm invoke -> 0.7 s    (no delay)
+cold invoke -> 32.9 s   (31 s delay applied)
+```
+
+This is why Exp 3 had never been validated: it only fires when `LexFulfillmentHandler`
+cold-starts, and any recent call leaves a warm container.
+
+**Root cause — "fast infrequent functions".** The
+[action reference](https://docs.aws.amazon.com/fis/latest/userguide/fis-actions-reference.html)
+states the delay "is applied to all execution environments rather than only affecting new
+execution environments", so cold-start-only behaviour is not by design. The explanation is in
+[Use the aws:lambda:function actions](https://docs.aws.amazon.com/fis/latest/userguide/use-lambda-actions.html):
+
+> If your Lambda function runs for less than the average poll duration of 70 milliseconds then
+> the polling thread may need multiple invocations to obtain fault configurations.
+
+These handlers run in 57–290 ms, so the extension's polling thread cannot finish inside an
+invocation and a warm container never obtains the configuration. A cold start works because the
+poll completes during `INIT`, where there is time.
+
+**Fix — two environment variables on both FIS-instrumented functions:**
+
+```yaml
+AWS_FIS_POLL_MAX_WAIT_MILLISECONDS: '3000'   # wait for an in-flight poll before running
+AWS_FIS_SLOW_POLL_INTERVAL_SECONDS: '20'     # was the default 60
+```
+
+**Verified on a warm container:**
+
+```
+poll interval 60 (default)  -> fault applied 93 s after start-experiment
+poll interval 20            -> fault applied 53 s after start-experiment
+```
+
+Both a genuine fix and a large usability win: the fault now applies to warm containers, and the
+arming wait drops from ~85 s to ~55 s.
+
+### Three behaviours worth recording separately
+
+**1. `AWS_FIS_SLOW_POLL_INTERVAL_SECONDS` has an undocumented minimum of 20.** The first attempt
+used `10`. The extension rejected it and fell back to 60 s, logging one line that is easy to
+miss among the polling chatter:
+
+```
+AWS FIS EXTENSION - Validation: cold-polling interval must be greater or equal to
+                    hot-polling interval (20). U...
+```
+
+Nothing failed, nothing warned louder, and the setting simply had no effect. If a tuning
+variable appears to do nothing, read the extension's own validation lines before concluding the
+setting is wrong.
+
+**2. FIS refuses to start an experiment whose stop-condition alarm is not `OK`.** This closes an
+open question from Fix 15, where the documentation was searched and said nothing about the
+pre-`ALARM` case. The failure is fast — ten seconds — and the message is explicit:
+
+```
+EXPUJCWmd5d294ahkE  failed  18:11:02 -> 18:11:12
+  Error while handling stop condition for experiment: EXPUJCWmd5d294ahkE.
+  The following alarms were not in state OK:
+    [arn:aws:cloudwatch:us-east-1:...:alarm:ConnectChaos-Exp3-Latency-us-east-1]
+```
+
+It bit during this very investigation: a cold-start probe produced a 31 270 ms datapoint, the
+Exp 3 alarm went `ALARM`, and the next experiment died on arrival — making a *working* warm-path
+fix look like it had failed. This is precisely what `make reset`'s "wait for alarms to clear"
+step exists to prevent, and it is why that step must not be skipped. The same failure explains
+the two earlier `failed` experiments in this account's history.
+
+**3. A diagnostic probe can trip a real alarm.** Fix 21 established that a direct `lambda invoke`
+cannot trip Experiment 1's alarm, because that alarm watches a Connect flow metric. That
+reasoning does **not** extend to Experiment 3, whose alarm watches `AWS/Lambda Duration` on the
+function itself — so probing it *does* produce a real breaching datapoint. Probe safety has to be
+assessed per experiment, against the specific metric and dimension the alarm uses. For Exp 3,
+expect the probe to fire the alarm and wait for it to clear before starting an experiment.
