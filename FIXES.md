@@ -1067,3 +1067,59 @@ resource type whose payload is an opaque string validated by a remote service, t
 reliable move is to exercise the real API with throwaway resources rather than reason about
 documentation. Nine single-construct flows localised the fault in one pass, at zero risk,
 after one failed stack update had already cost a full rollback.
+
+---
+
+## Fix 20 — The new lookup Lambda could not read its FIS fault config
+
+**Symptom:** the first baseline call on the redesigned flows succeeded perfectly — DTMF capture,
+`LambdaInvocationAttributes`, the lookup, "Welcome back, John Doe" — but its log carried:
+
+```
+AWS FIS EXTENSION - failed to retrieve active fault configurations:
+  error when calling ListObjectsV2 on S3: AccessDenied
+```
+
+**Impact if it had shipped:** Experiment 1 would have reported `running`, then `completed`, and
+applied **no fault at all**. The call would simply have succeeded, and the alarm would have
+stayed `OK` — indistinguishable from "the experiment does not work". Exactly the silent-failure
+mode Fix 11 warned about for the S3 gateway endpoint, arriving here through IAM instead of
+routing.
+
+**Root cause:** `AccountLookupRole` was written with the permissions the *function* needs —
+`dynamodb:GetItem` plus VPC access — and not the permissions the *extension* needs.
+`LexFulfillmentRole` already carried a `FISConfigRead` policy (`s3:ListBucket` on the bucket,
+prefix-conditioned to `FisConfigs/*`, and `s3:GetObject` under it); the new role had no S3
+access whatsoever.
+
+```
+ConnectChaos-LexFulfillment-us-east-1  ['DynamoDB', 'FISConfigRead']
+ConnectChaos-AccountLookup-us-east-1   ['DynamoDBRead']              <- missing
+```
+
+**Fix:** mirror `FISConfigRead` onto `AccountLookupRole`. The template now also asserts the
+invariant structurally — *every* function carrying `FISExtensionLayerArn` must have a role with
+`FISConfigRead` — so adding a third FIS-targeted function cannot repeat this.
+
+**Verified by invocation, not by inspection.** An IAM policy being present does not prove the
+extension can read the object, so the function was invoked directly in both regions after a
+forced cold start:
+
+```
+us-east-1  {"status":"FOUND","customer_name":"John Doe","region":"us-east-1"}
+us-west-2  {"status":"FOUND","customer_name":"John Doe","region":"us-west-2"}
+AWS FIS EXTENSION - polling S3 for active faults impacting this Lambda function
+AWS FIS EXTENSION - no active faults found (updated polling interval 60s)
+```
+
+`AccessDenied` gone in both, and the lookup resolves against each region's own Global Table
+replica.
+
+**Why this was caught at all.** Only because the extension logs its failure and the log was
+read *before* a test call was spent on Experiment 1. Nothing else surfaces it: the stack
+deploys clean, `cfn-lint` passes, `make verify` passes, the baseline call succeeds, and the
+experiment would have reported success. The generalisable rule is the one from Fix 15 — verify
+the **fault**, the **metric** and the **alarm** as three separate steps — with an addition:
+for extension-based faults, verify the extension can *fetch its configuration* before trusting
+any experiment result. The line to look for is `no active faults found`; anything else means
+the fault will not be applied.

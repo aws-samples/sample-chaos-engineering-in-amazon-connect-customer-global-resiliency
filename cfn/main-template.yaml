@@ -754,6 +754,25 @@ Resources:
                 Action: [dynamodb:GetItem]
                 Resource:
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}-Customers'
+        # MANDATORY for Experiment 1. The FIS Lambda extension reads its fault config from
+        # S3 (AWS_FIS_CONFIGURATION_LOCATION). Without this the extension logs
+        #   "failed to retrieve active fault configurations: ... ListObjectsV2 ... AccessDenied"
+        # and then runs the invocation NORMALLY - the experiment reports success while
+        # applying no fault at all. Mirrors LexFulfillmentRole's FISConfigRead. See FIXES.md
+        # Fix 20; the same class of silent failure as the S3 gateway endpoint in Fix 11.
+        - PolicyName: FISConfigRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt FISConfigBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: ['FisConfigs/*']
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${FISConfigBucket.Arn}/FisConfigs/*'
 
   FISExecutionRole:
     Type: AWS::IAM::Role
