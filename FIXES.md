@@ -1209,3 +1209,119 @@ seconds, with no phone call, no experiment and no 180-second window — so the *
 `filter_log_events` returned nothing for a log group that visibly had recent events in
 `describe_log_streams`. When a Lambda looks silent but should not be, read the stream with
 `get_log_events` before concluding it was never invoked.
+
+---
+
+## Fix 22 — Failover was too fast to observe; added a configurable dwell
+
+**Motivation, from a real Experiment 1 run:**
+
+```
+15:43:20  caller hears "the account lookup service is unavailable"
+15:44:51  ConnectChaos-Exp1-Lambda-us-east-1  OK -> ALARM
+15:44:53  Traffic shifted: us-east-1=0% / us-west-2=100%
+```
+
+Ninety-three seconds from failure to repair, all of it CloudWatch metric latency rather than a
+deliberate choice. For a demonstration that is backwards: the point is hearing the *same number*
+fail and then succeed from another Region, and an audience needs time to observe the failure
+before it is fixed.
+
+**Fix:** `FailoverDelaySeconds` (default **120**, min 0, max 600) makes the dwell explicit.
+`TrafficShiftHandler` logs it, waits, then shifts. `make deploy` accepts
+`FAILOVER_DELAY_SECONDS=` to override.
+
+Two supporting changes that are not cosmetic:
+
+- **The handler timeout had to rise from 30 s to 660 s.** Otherwise Lambda kills the function
+  mid-sleep, EventBridge retries the asynchronous invocation, and you get repeated partial
+  waits and no shift. 660 s is chosen to clear the 600 s parameter maximum.
+- **The idempotency check is re-run after the sleep.** During a two-minute wait the paired
+  Region's handler, or an operator, may already have moved traffic; writing blindly afterwards
+  would undo a newer decision.
+
+**Verified:**
+
+```
+16:06:22  Alarm state: ALARM, My region: us-east-1
+16:06:22  Holding failover for 120s so the impaired region can be experienced
+16:08:23  Traffic shifted: us-east-1=0%, us-west-2=100%      <- 121s
+16:08:50  TDG already shifted — no-op.                       <- duplicate correctly ignored
+```
+
+---
+
+## Fix 23 — A dwelling handler ignored everything that happened while it slept
+
+**Symptom.** Immediately after Fix 22, a dwell measurement showed traffic shifting **10 seconds**
+after the alarm instead of 120. Two log streams explained it:
+
+```
+16:12:36  stream c0b3c691  "Holding failover for 120s ..."          <- the new invocation
+16:12:37  stream 19923a78  "Traffic shifted"  RequestId 8867d222    <- an OLDER invocation
+```
+
+An invocation that had begun sleeping *before* a `make reset` woke up afterwards and shifted
+traffic anyway, one second into the next test. The reset had restored 100/0; the sleeper undid
+it silently.
+
+**Root cause.** Fix 22's post-dwell check asked the wrong question. It asked *"has someone
+already shifted away from me?"* — after a reset the answer is no, so it proceeded. The question
+that matters is whether the **condition still holds**.
+
+**Fix.** After the dwell, re-read the triggering alarm (its name arrives in the EventBridge
+event as `detail.alarmName`) and abandon the failover if it is no longer in `ALARM`:
+
+```
+16:22:11  Holding failover for 120s ...
+16:24:11  ConnectChaos-Composite-us-east-1 is now OK after the 120s dwell -
+          the impairment cleared or was reset. Not failing over.
+```
+
+`TrafficShiftRole` gains `cloudwatch:DescribeAlarms` (which does not support resource-level
+permissions, so `Resource: '*'`).
+
+**This is a behavioural improvement, not just a bug fix.** It gives the sample proper debounce
+semantics: an impairment that clears inside the dwell no longer causes a Region failover. That
+is what you would actually want in production — you do not move a contact centre between
+Regions because of a two-second blip.
+
+### Consequence: `set-alarm-state` no longer works as a failover test
+
+This matters because Fix 21 recommended exactly that technique, and it is now invalid whenever
+a dwell is configured.
+
+`SetAlarmState` is a **temporary override**. CloudWatch re-evaluates and reverts it on the next
+period — measured at ~50 s:
+
+```
+16:22:10  OK -> ALARM   reason: "clean dwell test"      (forced)
+16:23:01  ALARM -> OK   reason: "no datapoints ... treated as [NonBreaching]"
+16:24:11  handler declines: alarm is OK after the dwell
+```
+
+The forced state expires inside the 120 s wait, so Fix 23 correctly refuses to fail over, and
+no traffic moves. **Real faults are unaffected**: on the Experiment 1 run the alarm held `ALARM`
+from 15:44:51 to 15:52:51 — about eight minutes, because CloudWatch is slow to re-evaluate a
+breached alarm back to `OK` — which comfortably contains a 120 s dwell.
+
+**How to test each half now:**
+
+| Goal | Method |
+|---|---|
+| Failover mechanism only | redeploy with `FAILOVER_DELAY_SECONDS=0`, then `set-alarm-state` |
+| Fault injection only | direct `lambda invoke`, check for `FunctionError` |
+| End to end | a real call, with the dwell at its configured value |
+
+**Also: a dwelling handler outlives `make reset`.** If you reset while a handler is sleeping and
+the alarm is still genuinely in `ALARM`, the shift will still land after the dwell — correctly,
+because the impairment is real. Either wait out the dwell before resetting, or reset twice about
+130 seconds apart. Fix 23 only suppresses the shift when the alarm has actually cleared.
+
+### The wider lesson
+
+Adding a delay to a reactive control loop changed its correctness requirements, not just its
+timing. Any state read *before* a wait may be stale after it, so every precondition has to be
+re-evaluated on the far side — and the precondition that matters is the *triggering condition*,
+not the side effect you were about to write. The first version of this fix re-checked the
+side effect and was still wrong.

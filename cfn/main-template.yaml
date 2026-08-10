@@ -123,6 +123,19 @@ Parameters:
       the object in S3 was replaced - shipping code and configuration that disagree. That
       failure is silent: the stack reports UPDATE_COMPLETE. See FIXES.md Fix 21.
 
+  FailoverDelaySeconds:
+    Type: Number
+    Default: 120
+    MinValue: 0
+    MaxValue: 600
+    Description: >-
+      How long TrafficShiftHandler waits AFTER the composite alarm fires before moving
+      telephony to the paired Region. The point is demonstrative: it lets callers experience
+      the impaired Region rather than having it repaired out from under them. Detection
+      already costs ~90s of Connect metric latency, so the total broken window is roughly
+      that plus this value. Set 0 for fastest recovery. Capped at 600 because the handler's
+      timeout must exceed it (see FIXES.md Fix 22).
+
   ContactFlowErrorsThreshold:
     Type: Number
     Default: 0
@@ -874,6 +887,15 @@ Resources:
                 # correct identifier. See FIXES.md Fix 17.
                 Resource: !Sub
                   'arn:aws:connect:${PrimaryRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
+        - PolicyName: ReadAlarmState
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Needed to re-check the alarm after the failover dwell (FIXES.md Fix 23).
+              # DescribeAlarms does not support resource-level permissions.
+              - Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: '*'
 
   # ── Lex V2 Bot ──
   # When EnableLexGlobalResiliency=true (default): bot is created in PRIMARY only and
@@ -1171,7 +1193,7 @@ Resources:
       Runtime: python3.13
       Handler: traffic_shift_handler.lambda_handler
       Role: !GetAtt TrafficShiftRole.Arn
-      Timeout: 30
+      Timeout: 660
       MemorySize: 128
       Code:
         S3Bucket: !Ref LambdaCodeBucket
@@ -1182,6 +1204,7 @@ Resources:
           # region it was created in; from the paired region that returns
           # ResourceNotFoundException. Passing the ARN lets EITHER region drive the TDG,
           # which is what makes failover possible when the primary region is impaired.
+          FAILOVER_DELAY_SECONDS: !Ref FailoverDelaySeconds
           TRAFFIC_DISTRIBUTION_GROUP_ARN: !Sub
             'arn:aws:connect:${PrimaryRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
           MY_REGION: !Ref 'AWS::Region'

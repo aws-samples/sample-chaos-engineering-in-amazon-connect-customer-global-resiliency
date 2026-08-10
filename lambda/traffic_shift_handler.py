@@ -28,6 +28,8 @@ Region-pair correctness:
 import os
 import json
 import logging
+import time
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -41,6 +43,10 @@ MY_REGION = os.environ['MY_REGION']
 PRIMARY_REGION = os.environ['PRIMARY_REGION']
 PAIRED_REGION = os.environ['PAIRED_REGION']
 
+# Deliberate dwell before repairing, so the impaired Region can be experienced. See FIXES.md
+# Fix 22. Detection already costs ~90s of Connect metric latency; this is added on top.
+FAILOVER_DELAY_SECONDS = int(os.environ.get('FAILOVER_DELAY_SECONDS', '0'))
+
 if not TRAFFIC_DISTRIBUTION_GROUP_ARN.startswith('arn:'):
     raise ValueError(
         'TRAFFIC_DISTRIBUTION_GROUP_ARN must be a full ARN, not a bare UUID: '
@@ -49,6 +55,7 @@ if not TRAFFIC_DISTRIBUTION_GROUP_ARN.startswith('arn:'):
     )
 
 connect_client = boto3.client('connect')
+cloudwatch_client = boto3.client('cloudwatch')
 
 
 def lambda_handler(event, context):
@@ -65,10 +72,11 @@ def lambda_handler(event, context):
         return {'statusCode': 200, 'body': f'No action for state: {alarm_state}'}
 
     other_region = PAIRED_REGION if MY_REGION == PRIMARY_REGION else PRIMARY_REGION
-    return shift_traffic(away_from=MY_REGION, towards=other_region)
+    alarm_name = event.get('detail', {}).get('alarmName')
+    return shift_traffic(away_from=MY_REGION, towards=other_region, alarm_name=alarm_name)
 
 
-def shift_traffic(away_from, towards):
+def shift_traffic(away_from, towards, alarm_name=None):
     """Idempotently set TDG distribution to 0/100 (away_from = 0%)."""
     # Idempotency guard: skip the write if the TDG is already shifted away from this region.
     try:
@@ -89,6 +97,58 @@ def shift_traffic(away_from, towards):
         # If the read fails we fall through to the write — better to over-write
         # than to silently skip a real failover.
         logger.warning(f"GetTrafficDistribution failed; proceeding with write. {exc}")
+
+    # Deliberate dwell: let callers actually experience the impaired Region.
+    if FAILOVER_DELAY_SECONDS > 0:
+        logger.info(
+            f"Holding failover for {FAILOVER_DELAY_SECONDS}s so the impaired region can be "
+            f"experienced (FailoverDelaySeconds). Will then shift {away_from} -> {towards}."
+        )
+        time.sleep(FAILOVER_DELAY_SECONDS)
+
+        # Re-check the CONDITION first. A sleeping invocation is otherwise immune to
+        # anything that happens during the dwell: an operator reset, or the fault being
+        # remediated. Waking up and failing over then moves traffic away from a region that
+        # is now healthy. This also debounces transient blips that clear within the dwell.
+        if alarm_name:
+            try:
+                resp = cloudwatch_client.describe_alarms(
+                    AlarmNames=[alarm_name], AlarmTypes=['CompositeAlarm', 'MetricAlarm'])
+                states = ([a['StateValue'] for a in resp.get('CompositeAlarms', [])]
+                          + [a['StateValue'] for a in resp.get('MetricAlarms', [])])
+                if states and 'ALARM' not in states:
+                    logger.info(
+                        f"{alarm_name} is now {states[0]} after the {FAILOVER_DELAY_SECONDS}s "
+                        f"dwell - the impairment cleared or was reset. Not failing over."
+                    )
+                    return {
+                        'statusCode': 200,
+                        'body': json.dumps({'action': 'NOOP_ALARM_CLEARED_DURING_DELAY',
+                                            'alarm': alarm_name, 'state': states[0]})
+                    }
+            except ClientError as exc:
+                logger.warning(f"Post-delay DescribeAlarms failed; proceeding. {exc}")
+
+        # Then re-check the traffic itself, in case the paired region's handler already moved
+        # it while we waited - writing blindly would undo a more recent decision.
+        try:
+            current = connect_client.get_traffic_distribution(Id=TRAFFIC_DISTRIBUTION_GROUP_ARN)
+            existing = {
+                row['Region']: row.get('Percentage', 0)
+                for row in current.get('TelephonyConfig', {}).get('Distributions', [])
+            }
+            if existing.get(away_from, 100) == 0:
+                logger.info(
+                    f"After the dwell, {away_from} is already at 0% - another actor shifted "
+                    f"traffic meanwhile. Leaving {existing} untouched."
+                )
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps({'action': 'NOOP_SHIFTED_DURING_DELAY',
+                                        'state': existing})
+                }
+        except ClientError as exc:
+            logger.warning(f"Post-delay GetTrafficDistribution failed; proceeding. {exc}")
 
     try:
         connect_client.update_traffic_distribution(

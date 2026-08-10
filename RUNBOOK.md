@@ -284,6 +284,34 @@ Open the dashboard: **CloudWatch → Dashboards → `ConnectChaos-<primary-regio
 
 ---
 
+## Timing you must expect
+
+Measured on this sample, not estimated:
+
+| Step | Delay |
+|---|---|
+| `start-experiment` -> fault actually effective (Exps 1 and 3) | **~60-80 s** |
+| Fault persistence | intermittent; ~20-30 s lapses |
+| Exp 2 fault | immediate, never expires |
+| Call -> `ContactFlowErrors` published | ~60-90 s |
+| Alarm -> traffic shifted | **`FailoverDelaySeconds`** (default 120 s) + ~2 s |
+
+So a full Experiment 1 cycle is roughly: start, wait ~85 s, call, wait ~90 s for the alarm,
+then a further ~120 s dwell before traffic moves. Do not conclude anything is broken before
+about four minutes have passed.
+
+Two consequences worth knowing:
+
+- **`set-alarm-state` cannot test failover while a dwell is configured.** A forced alarm state
+  is a temporary override that CloudWatch reverts within ~50 s, so it expires inside the dwell
+  and the handler correctly declines to fail over. To test the mechanism alone, redeploy with
+  `FAILOVER_DELAY_SECONDS=0`. See FIXES.md Fix 23.
+- **A dwelling handler outlives a reset.** If you reset while a handler is sleeping and the
+  alarm is genuinely still in `ALARM`, the shift still lands after the dwell. Wait out the
+  dwell before resetting, or reset twice ~130 s apart.
+
+---
+
 ## Step R — Reset between every experiment
 
 ```bash

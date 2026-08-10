@@ -249,6 +249,7 @@ FIS extension layer ARN. All are created or auto-resolved.
 | `ContactFlowErrorsThreshold` | | `0` | Exps 1 and 2. `0` = one flow error trips the alarm. Raise for production monitoring |
 | `LexCodeHookLatencyThresholdMs` | | `7000` | Exp 3 |
 | `QueueWaitSecondsThreshold` | | `60` | Exp 4 |
+| `FailoverDelaySeconds` | | `120` | How long to HOLD the failover after the alarm fires, so callers can experience the impaired Region. `0` = shift immediately |
 | `FISExperimentDuration` | | `PT5M` | ISO-8601 |
 | `PairedConnectInstanceId` | | `''` | Primary only, when `DashboardType=unified` |
 

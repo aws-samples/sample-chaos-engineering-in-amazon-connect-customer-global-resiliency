@@ -96,7 +96,7 @@ deploy: bootstrap
 	  echo "Required: STACK, REGION, CONNECT_INSTANCE_ARN, CONNECT_INSTANCE_ID, TDG_ID"; \
 	  echo "Optional: PRIMARY_REGION PAIRED_REGION CREATE_VPC ENABLE_AUTO_FAILOVER"; \
 	  echo "          ENABLE_LEX_GR ENABLE_TRAFFIC_GEN DASHBOARD_TYPE"; \
-	  echo "          CONTACT_FLOW_ERRORS_THRESHOLD"; \
+	  echo "          CONTACT_FLOW_ERRORS_THRESHOLD FAILOVER_DELAY_SECONDS"; \
 	  echo "          REPLICATED_LEX_BOT_ID REPLICATED_LEX_BOT_ALIAS_ID"; \
 	  echo "          LAMBDA_SUBNET_A LAMBDA_SUBNET_B LAMBDA_SG  (only if CREATE_VPC=false)"; \
 	  exit 2; \
@@ -125,6 +125,7 @@ deploy: bootstrap
 	    DashboardType=$(or $(DASHBOARD_TYPE),regional) \
 	    ContactFlowErrorsThreshold=$(or $(CONTACT_FLOW_ERRORS_THRESHOLD),0) \
 	    LambdaCodeVersion=$(LAMBDA_CODE_VERSION) \
+	    FailoverDelaySeconds=$(or $(FAILOVER_DELAY_SECONDS),120) \
 	    ReplicatedLexBotId=$(REPLICATED_LEX_BOT_ID) \
 	    ReplicatedLexBotAliasId=$(REPLICATED_LEX_BOT_ALIAS_ID)
 
