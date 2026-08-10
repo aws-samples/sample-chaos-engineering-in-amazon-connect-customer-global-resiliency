@@ -249,7 +249,7 @@ data, the traffic split and the alarms. It cannot check the number → flow link
 aws dynamodb put-item --table-name $STACK-Customers --region $PRIMARY_REGION \
   --item '{"account_id":{"S":"12345"},"customer_name":{"S":"John Doe"}}'
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
-  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
+  --item '{"config_key":{"S":"chaos_flag#'$PRIMARY_REGION'"},"enabled":{"BOOL":false}}'
 
 # prove global-table replication works
 aws dynamodb get-item --table-name $STACK-Customers --region $PAIRED_REGION \
@@ -366,7 +366,7 @@ aws connect update-traffic-distribution --id $TDG_ID --region $PRIMARY_REGION \
   --telephony-config "{\"Distributions\":[{\"Region\":\"$PRIMARY_REGION\",\"Percentage\":100},{\"Region\":\"$PAIRED_REGION\",\"Percentage\":0}]}"
 
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
-  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
+  --item '{"config_key":{"S":"chaos_flag#'$PRIMARY_REGION'"},"enabled":{"BOOL":false}}'
 
 # must return EMPTY, in BOTH regions
 aws cloudwatch describe-alarms --region $PRIMARY_REGION --alarm-name-prefix ConnectChaos- \
@@ -523,7 +523,7 @@ profile, so no agent can ever receive its contacts) and transfers the contact th
 
 ```bash
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
-  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":true}}'
+  --item '{"config_key":{"S":"chaos_flag#'$PRIMARY_REGION'"},"enabled":{"BOOL":true}}'
 ```
 
 Call, press **4**, and **stay on the line past the threshold**, or:
@@ -551,7 +551,7 @@ aws cloudwatch get-metric-statistics --namespace AWS/Connect \
 
 ```bash
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
-  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
+  --item '{"config_key":{"S":"chaos_flag#'$PRIMARY_REGION'"},"enabled":{"BOOL":false}}'
 ```
 
 **Pass:**

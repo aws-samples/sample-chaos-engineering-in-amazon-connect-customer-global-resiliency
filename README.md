@@ -146,7 +146,13 @@ contact there. It waits indefinitely and `LongestQueueWaitTime` climbs.
 - **Prompt:** *"All agents are currently busy. Please hold. This is experiment four."*
 - **Why not `MissedCalls`?** It requires a call to be *offered to an agent* and go unanswered
   for 20 s, which is not reproducible without a staffed agent deliberately not answering.
-- Not a FIS experiment — you toggle a DynamoDB flag. **Stay on the line ≥ 90 s**, since the
+- Not a FIS experiment — you toggle a DynamoDB flag.
+- **The flag is region-scoped (`chaos_flag#<region>`) on purpose.** The config table is a Global
+  Table, so a single shared key would replicate the fault to the paired Region and failover could
+  never recover: the caller would land in a Region reading the same broken row and queueing into
+  the same unstaffed queue. This is the one genuinely important lesson in the sample — *a
+  dependency failure that lives in replicated data is not a regional failure, and traffic
+  shifting will not fix it.* See [FIXES.md](FIXES.md) Fix 25. **Stay on the line ≥ 90 s**, since the
   signal is accumulated queue wait, not a count.
 
 ---
@@ -320,7 +326,7 @@ region as `REPLICATED_LEX_BOT_ID` / `REPLICATED_LEX_BOT_ALIAS_ID`.
 aws dynamodb put-item --table-name $STACK-Customers --region $PRIMARY_REGION \
   --item '{"account_id":{"S":"12345"},"customer_name":{"S":"John Doe"}}'
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
-  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
+  --item '{"config_key":{"S":"chaos_flag#us-east-1"},"enabled":{"BOOL":false}}'
 ```
 
 ---
@@ -380,10 +386,10 @@ Experiment 4 is a flag, not a FIS experiment:
 ```bash
 # enable
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
-  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":true}}'
+  --item '{"config_key":{"S":"chaos_flag#us-east-1"},"enabled":{"BOOL":true}}'
 # disable — this does NOT expire on its own
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
-  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'
+  --item '{"config_key":{"S":"chaos_flag#us-east-1"},"enabled":{"BOOL":false}}'
 ```
 
 Each FIS experiment's stop condition is its **own** alarm, so it halts as soon as it

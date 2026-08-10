@@ -199,8 +199,10 @@ post-deploy:
 	aws dynamodb put-item --table-name $(STACK)-Customers --region $(PRIMARY_REGION) \
 	  --item '{"account_id":{"S":"12345"},"customer_name":{"S":"John Doe"}}'; \
 	aws dynamodb put-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
-	  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'; \
-	echo "    seeded $(STACK)-Customers (account 12345) and $(STACK)-Config (chaos_flag=false)"; \
+	  --item '{"config_key":{"S":"chaos_flag#$(PRIMARY_REGION)"},"enabled":{"BOOL":false}}'; \
+	aws dynamodb put-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
+	  --item '{"config_key":{"S":"chaos_flag#$(PAIRED_REGION)"},"enabled":{"BOOL":false}}'; \
+	echo "    seeded $(STACK)-Customers (account 12345) and disarmed chaos_flag#<region> for BOTH regions"; \
 	echo "=== 2/3 associating the phone number with ConnectChaos-Menu ==="; \
 	FLOW=$$(aws connect list-contact-flows --instance-id $(INSTANCE_ID) \
 	         --region $(PRIMARY_REGION) \
@@ -300,8 +302,10 @@ reset:
 	  --query "TelephonyConfig.Distributions[].[Region,Percentage]" --output text; \
 	echo "=== 3/4 disarming the Exp 4 chaos flag ==="; \
 	aws dynamodb put-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
-	  --item '{"config_key":{"S":"chaos_flag"},"enabled":{"BOOL":false}}'; \
-	echo "    chaos_flag = false"; \
+	  --item '{"config_key":{"S":"chaos_flag#$(PRIMARY_REGION)"},"enabled":{"BOOL":false}}'; \
+	aws dynamodb put-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
+	  --item '{"config_key":{"S":"chaos_flag#$(PAIRED_REGION)"},"enabled":{"BOOL":false}}'; \
+	echo "    chaos_flag#$(PRIMARY_REGION) and chaos_flag#$(PAIRED_REGION) = false"; \
 	echo "=== 4/4 waiting for alarms to clear ==="; \
 	for i in 1 2 3 4 5 6 7 8 9 10; do \
 	  BAD=""; \
@@ -450,10 +454,16 @@ verify:
 	if [ "$$C" = "None" ] || [ -z "$$C" ]; then echo "  FAIL  customer 12345 missing - run 'make post-deploy'"; FAIL=1; \
 	else echo "  PASS  customer 12345 = $$C"; fi; \
 	F=$$(aws dynamodb get-item --table-name $(STACK)-Config --region $(PRIMARY_REGION) \
-	     --key '{"config_key":{"S":"chaos_flag"}}' --query "Item.enabled.BOOL" --output text 2>/dev/null); \
+	     --key '{"config_key":{"S":"chaos_flag#$(PRIMARY_REGION)"}}' --query "Item.enabled.BOOL" --output text 2>/dev/null); \
 	if [ "$$F" = "False" ]; then echo "  PASS  chaos_flag = false (healthy)"; \
 	elif [ "$$F" = "True" ]; then echo "  FAIL  chaos_flag is TRUE - Exp 4 is still armed"; FAIL=1; \
-	else echo "  FAIL  chaos_flag missing - run 'make post-deploy'"; FAIL=1; fi; \
+	else echo "  FAIL  chaos_flag#$(PRIMARY_REGION) missing - run 'make post-deploy'"; FAIL=1; fi; \
+	FP=$$(aws dynamodb get-item --table-name $(STACK)-Config --region $(PAIRED_REGION) \
+	      --key '{"config_key":{"S":"chaos_flag#$(PAIRED_REGION)"}}' --query "Item.enabled.BOOL" --output text 2>/dev/null); \
+	if [ "$$FP" = "True" ]; then \
+	  echo "  FAIL  chaos_flag#$(PAIRED_REGION) is TRUE - the paired region is armed too,"; \
+	  echo "        so a failover could not recover. Run 'make reset'."; FAIL=1; \
+	else echo "  PASS  paired region flag disarmed (failover can recover)"; fi; \
 	echo "=== traffic distribution ==="; \
 	P=$$(aws connect get-traffic-distribution --id $(TDG_ID) --region $(PRIMARY_REGION) \
 	     --query "TelephonyConfig.Distributions[?Region=='$(PRIMARY_REGION)'].Percentage | [0]" --output text); \

@@ -42,6 +42,9 @@ logger.setLevel(logging.INFO)
 # Environment variables set by CFN
 TABLE_NAME = os.environ['CUSTOMER_TABLE_NAME']
 CHAOS_TABLE_NAME = os.environ['CHAOS_TABLE_NAME']
+# Lambda sets AWS_REGION in every execution environment. Used to scope Experiment 4's chaos
+# flag per region so the fault is regional rather than replicated (FIXES.md Fix 25).
+REGION = os.environ.get('AWS_REGION', 'unknown')
 
 # Short, bounded DynamoDB timeouts so Experiment 2 (network disruption) fails FAST
 # and CATCHABLY instead of hanging until the 8s Lambda timeout. If the DDB call
@@ -128,7 +131,7 @@ def handle_lookup_customer(intent_name, slots):
         # ─────────────────────────────────────────────────────────
         chaos_enabled = _check_chaos_flag()
         if chaos_enabled:
-            logger.warning("CHAOS FLAG ENABLED — returning Failed state to Lex")
+            logger.warning(f"CHAOS FLAG ENABLED for {REGION} — returning Failed state to Lex")
             return build_lex_response(
                 intent_name=intent_name,
                 fulfillment_state='Failed',
@@ -175,7 +178,7 @@ def handle_check_order(intent_name, slots):
         # Chaos flag check (same rationale as handle_lookup_customer)
         chaos_enabled = _check_chaos_flag()
         if chaos_enabled:
-            logger.warning("CHAOS FLAG ENABLED — returning Failed state to Lex")
+            logger.warning(f"CHAOS FLAG ENABLED for {REGION} — returning Failed state to Lex")
             return build_lex_response(
                 intent_name=intent_name,
                 fulfillment_state='Failed',
@@ -203,15 +206,25 @@ def handle_check_order(intent_name, slots):
 
 def _check_chaos_flag():
     """
-    Read the chaos flag from DynamoDB config table.
-    
-    Returns True if chaos is enabled, False otherwise.
-    If the config table is unreachable (e.g., during Exp 2 DDB disruption),
-    returns False so the error propagates from the customer lookup instead.
+    Read THIS REGION's chaos flag from the DynamoDB config table.
+
+    The key is region-scoped on purpose: `chaos_flag#<region>`.
+
+    The config table is a Global Table, so a single shared key would replicate the fault to
+    the paired Region and Experiment 4 could never demonstrate recovery - failover would move
+    the caller to a Region reading the same "broken" row, queueing into the same unstaffed
+    queue. Scoping by region makes the fault genuinely regional, like Exps 1-3, so the paired
+    Region serves normally after failover. Replication still happens and is now harmless: the
+    row copies across, but each Region only ever reads its own key. See FIXES.md Fix 25.
+
+    Returns True if chaos is enabled for this region, False otherwise.
+    If the config table is unreachable (e.g. during Exp 2's DynamoDB disruption), returns
+    False so the error propagates from the customer lookup instead.
     """
+    flag_key = f'chaos_flag#{REGION}'
     try:
         chaos_response = chaos_table.get_item(
-            Key={'config_key': 'chaos_flag'}
+            Key={'config_key': flag_key}
         )
         chaos_item = chaos_response.get('Item', {})
         return chaos_item.get('enabled', False)
@@ -221,7 +234,7 @@ def _check_chaos_flag():
         # already raised before we got here, so this path is only hit
         # if the chaos config table specifically is unreachable while
         # the customer table is fine (unlikely in practice).
-        logger.warning(f"Could not read chaos config: {str(e)}")
+        logger.warning(f"Could not read chaos config {flag_key}: {str(e)}")
         return False
 
 

@@ -1418,3 +1418,90 @@ reasoning does **not** extend to Experiment 3, whose alarm watches `AWS/Lambda D
 function itself — so probing it *does* produce a real breaching datapoint. Probe safety has to be
 assessed per experiment, against the specific metric and dimension the alarm uses. For Exp 3,
 expect the probe to fire the alarm and wait for it to clear before starting an experiment.
+
+---
+
+## Fix 25 — Experiment 4's fault was global, so failover could never recover from it
+
+**Symptom, spotted by inspection rather than a failed test:** if the overflow queue is
+unanswerable in the primary Region, it is equally unanswerable in the paired Region — so what
+exactly does failing over achieve?
+
+Nothing, as it turned out. Verified:
+
+```
+chaos_flag             ONE item in a DynamoDB Global Table -> replicated to both Regions
+ConnectChaos-Overflow  present in BOTH Regions, same id (ACGR replication)
+routing profiles referencing it:  NONE in us-east-1, NONE in us-west-2
+```
+
+Arming the flag impaired **both** Regions simultaneously. Experiment 4 could detect the fault,
+fire its alarm, and shift traffic flawlessly, and the caller would still fail — because the
+paired Region read the same row, took the same error branch, and queued into the same unstaffed
+queue. It was the only experiment that could not complete the runbook's own recovery step.
+
+This is a category difference the sample had not made explicit:
+
+| Exp | Where the fault lives | Regional? | Does failover recover? |
+|---|---|:---:|:---:|
+| 1 | FIS on one Region's Lambda | yes | yes |
+| 2 | Network ACL on one Region's subnets | yes | yes |
+| 3 | FIS on one Region's Lambda | yes | yes |
+| 4 | **a row in a Global Table** | **no** | **no** |
+
+**Fix:** scope the flag by Region — `chaos_flag#<AWS_REGION>`. `_check_chaos_flag()` reads its
+own Region's key. Arming writes only the primary Region's key; the paired Region looks for a key
+that does not exist, finds nothing, and serves normally. Replication still copies the row across
+and is now harmless, because each Region reads only its own key.
+
+`make post-deploy` seeds a disarmed key for both Regions, `make reset` disarms both, and
+`make verify` now additionally fails if the **paired** Region's flag is armed — because that
+silently removes the ability to recover, which is exactly the condition this fix eliminates.
+
+### The lesson is kept, because it is still true
+
+The pre-fix behaviour was not an ACGR defect. It is a real and under-rehearsed failure mode:
+
+> **A dependency failure that exists in replicated data is not a regional failure, and no amount
+> of traffic shifting will fix it.**
+
+Multi-Region architectures routinely fail this way. A poisoned configuration row, a bad feature
+flag, a corrupt cache entry, a schema migration — all replicate faithfully to the standby, which
+is the one thing you did not want replicated. Regional failover addresses *Regional* impairment
+only; it is not a general-purpose recovery mechanism, and treating it as one produces exactly the
+outcome observed here: every dashboard green, every alarm correct, traffic moved, customer still
+broken.
+
+The flag is region-scoped **deliberately, so Experiment 4 can demonstrate recovery**. Do not
+"simplify" it back to a single shared key: that would silently reintroduce a globally replicated
+fault and make the experiment's recovery step impossible again.
+
+### Rejected alternatives
+
+**Staff the overflow queue in the paired Region only.** The strongest possible proof — a real
+agent answering in PDX — but it reintroduces precisely the dependency Fix 9 removed: a human
+agent, staffed and logged in, which a reader following the runbook cannot reproduce. Reasonable
+for a live customer demo with an agent on hand; wrong for a published sample.
+
+**Leave it global and document it as a counter-example.** Genuinely instructive, and it was a
+close call. Rejected because three experiments already prove Regional failover, and the fourth
+would end its runbook section with "and the call stays broken", which reads as an unfinished
+sample rather than a deliberate lesson. Scoping the flag gets both: a working fourth experiment
+*and* the lesson, recorded above.
+
+**A customer-queue flow announcing the Region during the hold.** Deferred, not rejected. It would
+make the 90-second silent wait observable and give per-Region evidence from inside the queue, but
+it is observability rather than correctness, and it needs verification of whether
+`AWS::Connect::Queue` can attach a customer-queue flow declaratively or requires a post-deploy
+API call. Worth revisiting once Exp 4 is proven end to end.
+
+### Still unproven
+
+This fix does not address the open question about Experiment 4: whether
+`fulfillment_state='Failed'` causes Connect to take the Lex block's **error** branch at all. That
+is a valid Lex response rather than an exception, so Connect may match the intent-name condition
+and route to the success path, never reaching the queue in *either* Region. Experiment 3 showed
+the Lex error branch does fire on a code-hook *timeout*, which is encouraging but a different
+trigger. One test call settles it: hearing *"All agents are currently busy"* confirms the
+mechanism; hearing *"I found your information"* means the flow needs fixing before this fix
+matters.
