@@ -74,6 +74,23 @@ is in **[docs/BLOCK-DIAGRAM.md](docs/BLOCK-DIAGRAM.md)**.
 4. Then Experiment 4, then 1 and 3 (both need a call within ~3 minutes).
 5. Finally the **paired-region proof** — a call answered in PDX.
 
+> **Use the SAME digit for the recovery call.** After failover, dial again and press the digit
+> for the experiment you just ran — not a different one. The claim being proven is that *this
+> flow*, which just failed in the primary Region, now succeeds in the paired Region. Pressing a
+> different digit exercises a different flow and proves something weaker. There is no technical
+> difference; the distinction is what the test demonstrates.
+>
+> | Experiment | Failure call | Recovery call | Expected on recovery |
+> |---|:---:|:---:|---|
+> | 1 | `1` | `1` | *"Welcome back, John Doe"* |
+> | 2 | `2` | `2` | *"Your call has been recorded for quality purposes"* |
+> | 3 | `3` | `3` | *"I found your information"* |
+> | 4 | `4` | `4` | *"I found your information"* (flag off) |
+>
+> Every recovery call should open with *"Connected in region us-west-2"* — that announcement is
+> the proof of which Region served it, and needs no log inspection.
+
+
 ---
 
 ## 0. Shell variables
