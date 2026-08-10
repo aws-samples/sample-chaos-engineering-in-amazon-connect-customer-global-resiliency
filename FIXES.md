@@ -994,3 +994,76 @@ at all; `GetParticipantInput` with `StoreInput=True` must not declare `NoMatchin
 **Cost of the design:** five flows instead of two, all ACGR-replicated, all needing
 `$.AwsRegion` verification. `make verify` now checks all five in both regions — ARNs and the
 region announcement — which is the check that would have caught Fix 16 without spending a call.
+
+---
+
+## Fix 19 — Two undocumented flow-validation rules, found by a failed stack update
+
+**Symptom:** the Fix 18 deploy failed with
+
+```
+Exp1Flow  CREATE_FAILED
+  Resource handler returned message: "Service returned error code InvalidContactFlowException
+  (Service: Connect, Status Code: 400)"
+```
+
+CloudFormation rolled the entire update back — not just the flow — so `AccountLookupHandler`,
+the four renamed alarms and the Fix 17 TDG change all reverted with it. The old flows and the
+phone-number association survived, so the environment stayed usable.
+
+`InvalidContactFlowException` carries **no field, no reason and no position**. The only way to
+localise it is to ask the service. Creating throwaway flows that isolate one construct each
+produced this:
+
+```
+PASS  StoreInput=True  + InputValidation + errors [NoMatchingError]
+FAIL  StoreInput=True  + InputValidation + errors [NoMatchingError, InputTimeLimitExceeded]
+FAIL  StoreInput=True  without InputValidation
+FAIL  StoreInput="true"                                    (lowercase)
+FAIL  StoreInput=False + errors [NoMatchingError]           (no NoMatchingCondition)
+PASS  LambdaInvocationAttributes + ResponseValidation STRING_MAP
+PASS  Compare on $.External.status
+PASS  "Connected in region $.AwsRegion." as MessageParticipant Text
+PASS  "Welcome back, $.External.customer_name." as MessageParticipant Text
+```
+
+**Two rules that the
+[GetParticipantInput reference](https://docs.aws.amazon.com/connect/latest/devguide/participant-actions-getparticipantinput.html)
+does not state:**
+
+1. **With `StoreInput: "True"`, `InputTimeLimitExceeded` is rejected.** The reference lists it
+   among the action's error types without noting it is mutually exclusive with `StoreInput`. It
+   is consistent with the admin guide, which says a timeout on "Store customer input" takes the
+   **Success** branch with the stored value set to the literal string `Timeout` — so there is no
+   timeout *error* to branch on, and declaring one is invalid.
+2. **With `StoreInput: "False"`, `NoMatchingCondition` is required.** `NoMatchingError` alone
+   fails, because conditions are supported in that mode and the condition-miss branch is
+   mandatory.
+
+Also confirmed: `StoreInput` is **case-sensitive** (`"true"` fails), and `InputValidation` is
+genuinely required when `StoreInput` is `"True"` — the reference's "required if and only if" is
+accurate.
+
+**Fix:** delete the `InputTimeLimitExceeded` branch from the Exp 1 flow. Nothing is lost,
+because `account_lookup.py` already rejects the `Timeout` sentinel and returns `INVALID_INPUT`
+for the `Compare` block to route to the "no account number was received" prompt. That handling
+was written from the admin guide *before* this failure; only the flow was wrong.
+
+**The durable part of this fix is the validator, not the deletion.** `scripts/extract-flows.py`
+now enforces the per-action error lists, both rules above, the `StoreInput` casing, the
+`InvokeLambdaFunction`-has-no-Conditions restriction, transition-target resolution,
+`$.AwsRegion` on every Lambda and Lex ARN, and the presence of the region announcement — and
+`make lint` runs it. A negative test confirms it reproduces this exact finding:
+
+```
+$ make lint
+ERROR: Exp1Flow would be rejected or is ACGR-unsafe:
+  - ask: StoreInput=True must NOT declare InputTimeLimitExceeded ...
+```
+
+**Lesson worth keeping.** Flow content is validated **server-side at create time**, so
+`cfn-lint` cannot see any of this — the template was lint-clean and still failed. For a
+resource type whose payload is an opaque string validated by a remote service, the cheap and
+reliable move is to exercise the real API with throwaway resources rather than reason about
+documentation. Nine single-construct flows localised the fault in one pass, at zero risk,
+after one failed stack update had already cost a full rollback.

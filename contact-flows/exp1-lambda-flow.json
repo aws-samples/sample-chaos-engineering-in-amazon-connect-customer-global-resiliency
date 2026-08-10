@@ -38,10 +38,6 @@
         "NextAction": "lookup",
         "Errors": [
           {
-            "NextAction": "no-input",
-            "ErrorType": "InputTimeLimitExceeded"
-          },
-          {
             "NextAction": "lookup-down",
             "ErrorType": "NoMatchingError"
           }

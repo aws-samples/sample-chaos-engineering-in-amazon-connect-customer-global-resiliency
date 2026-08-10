@@ -72,12 +72,90 @@ def extract(text, logical_id):
     return json.loads(body)
 
 
+# Error types Amazon Connect accepts per action. Declaring a disallowed type fails
+# CreateContactFlow with a bare InvalidContactFlowException - no field, no reason - so these
+# are validated here instead of being discovered by a failed stack update.
+#
+# The last two entries were established by creating throwaway flows against the real API,
+# because the flow-language reference does not state either of them (FIXES.md Fix 19):
+#   StoreInput=True  -> InputTimeLimitExceeded is REJECTED (a timeout takes the Success
+#                       branch with the stored value set to the literal string "Timeout"),
+#                       and InputValidation is REQUIRED.
+#   StoreInput=False -> NoMatchingCondition is REQUIRED, since conditions are supported.
+ALLOWED_ERRORS = {
+    "MessageParticipant": {"NoMatchingError"},
+    "InvokeLambdaFunction": {"NoMatchingError"},
+    "Compare": {"NoMatchingCondition"},
+    "TransferToFlow": {"NoMatchingError"},
+    "UpdateContactTargetQueue": {"NoMatchingError"},
+    "TransferContactToQueue": {"NoMatchingError", "QueueAtCapacity"},
+    "ConnectParticipantWithLexBot": {"NoMatchingError", "NoMatchingCondition"},
+    "GetParticipantInput": {"NoMatchingError", "NoMatchingCondition",
+                            "InputTimeLimitExceeded", "InvalidPhoneNumber"},
+    "DisconnectParticipant": set(),
+}
+
+
+def validate(name, flow):
+    """Reject flows Amazon Connect would refuse, and ACGR-unsafe region pinning."""
+    problems = []
+    ids = [a["Identifier"] for a in flow["Actions"]]
+    if len(ids) != len(set(ids)):
+        problems.append("duplicate action identifiers")
+    if flow["StartAction"] not in ids:
+        problems.append(f"StartAction {flow['StartAction']!r} is not an action")
+
+    for a in flow["Actions"]:
+        t, ident = a["Type"], a["Identifier"]
+        if t not in ALLOWED_ERRORS:
+            problems.append(f"{ident}: unmodelled action type {t}")
+            continue
+        errs = {e["ErrorType"] for e in a["Transitions"].get("Errors", [])}
+        for bad in sorted(errs - ALLOWED_ERRORS[t]):
+            problems.append(f"{ident}: {t} may not declare {bad}")
+        if t == "InvokeLambdaFunction" and "Conditions" in a["Transitions"]:
+            problems.append(f"{ident}: InvokeLambdaFunction does not support Conditions")
+        if t == "GetParticipantInput":
+            stored = a["Parameters"].get("StoreInput")
+            if stored not in ("True", "False"):
+                problems.append(f"{ident}: StoreInput must be exactly 'True' or 'False', "
+                                f"got {stored!r} (the value is case-sensitive)")
+            if stored == "True":
+                if "InputTimeLimitExceeded" in errs:
+                    problems.append(f"{ident}: StoreInput=True must NOT declare "
+                                    "InputTimeLimitExceeded - a timeout takes the Success "
+                                    "branch with the value 'Timeout' (FIXES.md Fix 19)")
+                if "InputValidation" not in a["Parameters"]:
+                    problems.append(f"{ident}: StoreInput=True requires InputValidation")
+            if stored == "False" and "NoMatchingCondition" not in errs:
+                problems.append(f"{ident}: StoreInput=False requires a NoMatchingCondition "
+                                "error branch")
+        for tgt in (([a["Transitions"]["NextAction"]] if "NextAction" in a["Transitions"] else [])
+                    + [c["NextAction"] for c in a["Transitions"].get("Conditions", [])]
+                    + [e["NextAction"] for e in a["Transitions"].get("Errors", [])]):
+            if tgt not in ids:
+                problems.append(f"{ident}: transition to unknown action {tgt!r}")
+
+    body = json.dumps(flow)
+    for service in ("lambda", "lex"):
+        if f"arn:aws:{service}:" in body and f"arn:aws:{service}:$.AwsRegion:" not in body:
+            problems.append(f"a {service} ARN is pinned to one Region - the paired Region "
+                            "would use the wrong one (FIXES.md Fix 8 / Fix 16)")
+    if "Connected in region $.AwsRegion" not in body:
+        problems.append("does not announce the serving Region (FIXES.md Fix 18)")
+
+    if problems:
+        raise SystemExit(f"ERROR: {name} would be rejected or is ACGR-unsafe:\n  - "
+                         + "\n  - ".join(problems))
+
+
 def main():
     check = "--check" in sys.argv
     text = TPL.read_text(encoding="utf-8")
     stale = []
     for logical_id, filename in FLOWS.items():
         flow = extract(text, logical_id)
+        validate(logical_id, flow)
         rendered = json.dumps(flow, indent=2) + "\n"
         path = OUT / filename
         if check:
