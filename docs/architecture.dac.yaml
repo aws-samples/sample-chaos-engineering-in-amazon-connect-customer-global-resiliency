@@ -50,13 +50,13 @@ Diagram:
 
     PrimaryConnect:
       Type: AWS::Connect::Instance
-      Title: "Connect + Contact Flows"
+      Title: "Connect: Menu + 4 experiment flows"
     PrimaryLex:
       Type: AWS::Lex::Bot
       Title: "Lex V2 Bot (source)"
     PrimaryLambda:
       Type: AWS::Lambda::Function
-      Title: "LexFulfillmentHandler (FIS extension)"
+      Title: "LexFulfillmentHandler + AccountLookup (FIS extension)"
     PrimaryFISBucket:
       Type: AWS::S3::Bucket
       Title: "FIS config bucket"
@@ -68,7 +68,7 @@ Diagram:
       Title: "Customers + Config + CallLog (global tables)"
     PrimaryAlarms:
       Type: AWS::CloudWatch::Alarm
-      Title: "4 alarms: LambdaErrors, ContactFlowErrors, CodeHookLatency, QueueWait"
+      Title: "4 alarms: Exp1-Lambda, Exp2-DynamoDB, Exp3-Latency, Exp4-Queue"
     PrimaryComposite:
       Type: AWS::CloudWatch::Alarm
       Title: "Composite alarm"
@@ -88,7 +88,7 @@ Diagram:
       Title: "Lex V2 Bot (Lex GR replica)"
     PairedLambda:
       Type: AWS::Lambda::Function
-      Title: "LexFulfillmentHandler (FIS extension)"
+      Title: "LexFulfillmentHandler + AccountLookup (FIS extension)"
     PairedFISBucket:
       Type: AWS::S3::Bucket
       Title: "FIS config bucket"
@@ -100,7 +100,7 @@ Diagram:
       Title: "Customers + Config + CallLog (global tables)"
     PairedAlarms:
       Type: AWS::CloudWatch::Alarm
-      Title: "4 alarms: LambdaErrors, ContactFlowErrors, CodeHookLatency, QueueWait"
+      Title: "4 alarms: Exp1-Lambda, Exp2-DynamoDB, Exp3-Latency, Exp4-Queue"
     PairedComposite:
       Type: AWS::CloudWatch::Alarm
       Title: "Composite alarm"

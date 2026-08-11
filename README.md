@@ -275,7 +275,6 @@ FIS extension layer ARN. All are created or auto-resolved.
 | `RUNBOOK.md` | Step-by-step deploy + test guide |
 | `scripts/wire-paired-flow.sh` | Post-deploy, **only** if `EnableLexGlobalResiliency=false` |
 | `contact-flows/*.json` | Reference copies — **not deployed**. Live flows are inline in the template |
-| `docs/archive/` | Alternative experiment variants, **not wired in** |
 
 The same template deploys **twice**; `IsPrimaryRegion` controls what goes where. The global
 tables, both contact flows, the overflow queue and its hours of operation are created only
@@ -527,7 +526,6 @@ GR enabled, the replica bot is removed when the primary bot is deleted.
 | `contact-flows/` | Reference JSON copies (not deployed) |
 | `scripts/` | `wire-paired-flow.sh`, needed only when Lex GR is off |
 | `docs/` | Architecture diagram + source |
-| `docs/archive/` | Alternative experiment variants, not wired in — see its README |
 
 ---
 

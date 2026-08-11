@@ -177,7 +177,7 @@ Always confirm with `make verify` before demonstrating a failover.
                                           ▼
                               LexFulfillmentHandler returns Failed to Lex
                                           │
-                                          ▼ ChaosTest flow failure path
+                                          ▼ Exp4-Queue flow failure path
                               set queue ConnectChaos-Overflow (7b4d65cb-…)
                               transfer to queue  ── NO routing profile ⇒ NO agent
                                           │
