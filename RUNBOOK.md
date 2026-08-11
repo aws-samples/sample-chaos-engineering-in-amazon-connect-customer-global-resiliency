@@ -44,23 +44,40 @@ this file does not repeat it.
 
 Paste this once per terminal session. Every command below depends on it.
 
+**You supply three values. Everything else is derived or read from the stack.**
+
+| Variable | What it is | Shape, with an example | How to find yours |
+|---|---|---|---|
+| `INSTANCE_ID` | Connect instance ID. An ACGR replica shares the **same** ID in both Regions | UUID — `EXAMPLE1-2222-3333-4444-555555555555` | `aws connect list-instances --region $PRIMARY_REGION` |
+| `TDG_ID` | The Traffic Distribution Group failover updates | UUID — `EXAMPLE2-6666-7777-8888-999999999999` | `aws connect list-traffic-distribution-groups --region $PRIMARY_REGION` |
+| `PHONE` | The ported number attached to that TDG | E.164 — `+1-555-0100` | Step 1, check 3 below |
+
+> The examples above are **not real values** — they exist to show the shape. `EXAMPLE…` is not
+> valid hexadecimal, so a UUID that still contains it has not been replaced. The guard at the end
+> of this step catches that.
+
 ```bash
+# ── fixed for this sample ───────────────────────────────────────────────────────
 export STACK=connect-chaos-sample
 export PRIMARY_REGION=us-east-1
 export PAIRED_REGION=us-west-2
+
+# ── derived, never pasted ───────────────────────────────────────────────────────
 export ACCT=$(aws sts get-caller-identity --query Account --output text)
 
-# An ACGR replica shares the SAME instance id, so both ARNs differ only by Region.
-export INSTANCE_ID=<your-connect-instance-id>
+# ── REPLACE these three with your own values ────────────────────────────────────
+export INSTANCE_ID=EXAMPLE1-2222-3333-4444-555555555555
+export TDG_ID=EXAMPLE2-6666-7777-8888-999999999999
+export PHONE=+1-555-0100
+
+# ── built from the above; an ACGR pair differs only by Region ───────────────────
 export PRIMARY_INSTANCE_ARN=arn:aws:connect:$PRIMARY_REGION:$ACCT:instance/$INSTANCE_ID
 export PAIRED_INSTANCE_ARN=arn:aws:connect:$PAIRED_REGION:$ACCT:instance/$INSTANCE_ID
-
-# The Traffic Distribution Group holding your ported number, and the number itself.
-export TDG_ID=<your-traffic-distribution-group-id>
-export PHONE=<the-ported-number-on-that-tdg>
 ```
 
-Then read the FIS experiment template IDs straight out of the stack, rather than copying them:
+Now read the FIS experiment template IDs out of the stack rather than copying them. They change
+on every redeploy, so pasting them is how a test run ends up pointing at a template that no longer
+exists:
 
 ```bash
 get_out () { aws cloudformation describe-stacks --stack-name $STACK --region "$1" \
@@ -70,12 +87,27 @@ export EXP1=$(get_out $PRIMARY_REGION FISExperiment1)   # Lambda invocation erro
 export EXP2=$(get_out $PRIMARY_REGION FISExperiment2)   # DynamoDB network disruption
 export EXP3=$(get_out $PRIMARY_REGION FISExperiment3)   # Lex code-hook latency
 export GEN=ConnectChaos-TrafficGenerator-$PRIMARY_REGION
-
-echo "exp1=$EXP1  exp2=$EXP2  exp3=$EXP3"
 ```
 
-All three must print a value starting `EXT`. An empty result means `EnableAutoFailover` or the
-stack outputs are not what you expect — stop and check the stack before going further.
+**Guard — run this before anything else.** It fails loudly if an example value survived or a
+lookup came back empty, which is cheaper than discovering it three commands into an experiment:
+
+```bash
+ok=1
+case "$INSTANCE_ID$TDG_ID$PHONE" in
+  *EXAMPLE*|*555-0100*) echo "FAIL  replace the three example values in Step 0"; ok=0 ;;
+esac
+for v in ACCT INSTANCE_ID TDG_ID PHONE EXP1 EXP2 EXP3; do
+  eval "val=\$$v"
+  [ -n "$val" ] || { echo "FAIL  \$$v is empty"; ok=0; }
+done
+case "$EXP1" in EXT*) ;; *) echo "FAIL  EXP1 is not a FIS template id: '$EXP1'"; ok=0 ;; esac
+[ "$ok" = 1 ] && echo "OK  environment ready: acct=$ACCT instance=$INSTANCE_ID exp1=$EXP1"
+```
+
+`EXP1`–`EXP3` must each be a FIS template ID, which begins `EXT` and is about fifteen characters.
+An empty result means `EnableAutoFailover` was `false` at deploy time, or the stack name and Region
+are not what you think — stop and check the stack before going further.
 
 ---
 
@@ -141,7 +173,7 @@ done
 ```
 
 Every row must read `OK` or `INSUFFICIENT_DATA`. Open the dashboard now so you can watch:
-**CloudWatch → Dashboards → `ConnectChaos-<primary-region>`**.
+**CloudWatch → Dashboards → `ConnectChaos-$PRIMARY_REGION`**.
 
 ---
 
@@ -299,7 +331,7 @@ aws logs tail /aws/lambda/ConnectChaos-TrafficShiftHandler --region $PRIMARY_REG
 ```
 
 **Pass:** component `ALARM` → composite `ALARM` → primary `0` / paired `100` → a log line
-`Traffic shifted: <primary>=0%, <paired>=100%`.
+`Traffic shifted: $PRIMARY_REGION=0%, $PAIRED_REGION=100%`.
 
 **5. Recovery call — press `1` again.** Dial once more and press **1**, the same digit. You should
 hear *"Connected in region us-west-2"* then *"Welcome back, John Doe"*. This is what proves the
@@ -345,10 +377,10 @@ aws logs tail /aws/lambda/ConnectChaos-CallLogger --region $PRIMARY_REGION --sin
 
 | Check | Expected |
 |---|---|
-| `ConnectChaos-Exp2-DynamoDB-<primary>` | `ALARM` |
-| `ConnectChaos-Composite-<primary>` | `ALARM` |
+| `ConnectChaos-Exp2-DynamoDB-$PRIMARY_REGION` | `ALARM` |
+| `ConnectChaos-Composite-$PRIMARY_REGION` | `ALARM` |
 | Traffic distribution | primary `0` / paired `100` |
-| `ConnectChaos-TrafficShiftHandler` log | `Traffic shifted: <primary>=0%, <paired>=100%` |
+| `ConnectChaos-TrafficShiftHandler` log | `Traffic shifted: $PRIMARY_REGION=0%, $PAIRED_REGION=100%` |
 | `ConnectChaos-CallLogger` log | a DynamoDB timeout or connection error |
 
 `ContactFlowErrors` only increments for **real contacts**, so a live call is the true test here.
@@ -477,8 +509,8 @@ aws cloudwatch get-metric-statistics --namespace AWS/Connect \
 | Check | Expected |
 |---|---|
 | `LongestQueueWaitTime` (Maximum) | a datapoint **> 60** for `QueueName=ConnectChaos-Overflow` |
-| `ConnectChaos-Exp4-Queue-<primary>` | `ALARM` |
-| `ConnectChaos-Composite-<primary>` | `ALARM` |
+| `ConnectChaos-Exp4-Queue-$PRIMARY_REGION` | `ALARM` |
+| `ConnectChaos-Composite-$PRIMARY_REGION` | `ALARM` |
 | Traffic distribution | primary `0` / paired `100` |
 | `LexFulfillmentHandler` log | the chaos flag being read as enabled |
 

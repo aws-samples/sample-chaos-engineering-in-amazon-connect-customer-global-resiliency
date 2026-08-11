@@ -397,20 +397,30 @@ Region and replicated by ACGR and DynamoDB.
 
 ### Step 1 — set your environment
 
+You supply **two** values; the rest are derived. Both are UUIDs:
+
+| Variable | What it is | Example (not a real value) | How to find yours |
+|---|---|---|---|
+| `INSTANCE_ID` | Connect instance ID. An ACGR replica shares the **same** ID in both Regions, which is how you recognise a pair | `EXAMPLE1-2222-3333-4444-555555555555` | `aws connect list-instances --region us-east-1` |
+| `TDG_ID` | The Traffic Distribution Group that failover updates | `EXAMPLE2-6666-7777-8888-999999999999` | `aws connect list-traffic-distribution-groups --region us-east-1` |
+
 ```bash
 export STACK=connect-chaos-sample
 export PRIMARY_REGION=us-east-1
 export PAIRED_REGION=us-west-2
 export ACCT=$(aws sts get-caller-identity --query Account --output text)
 
+# REPLACE both — the values below only show the expected shape.
+export INSTANCE_ID=EXAMPLE1-2222-3333-4444-555555555555
+export TDG_ID=EXAMPLE2-6666-7777-8888-999999999999
+
 # An ACGR replica shares the SAME instance id, so the two ARNs differ only by Region.
-export INSTANCE_ID=<your-connect-instance-id>
 export PRIMARY_INSTANCE_ARN=arn:aws:connect:$PRIMARY_REGION:$ACCT:instance/$INSTANCE_ID
 export PAIRED_INSTANCE_ARN=arn:aws:connect:$PAIRED_REGION:$ACCT:instance/$INSTANCE_ID
-
-# The Traffic Distribution Group that has your ported phone number attached.
-export TDG_ID=<your-traffic-distribution-group-id>
 ```
+
+`EXAMPLE…` is not valid hexadecimal, so a UUID still containing it has not been replaced —
+[RUNBOOK Step 0](RUNBOOK.md#step-0--shell-variables) has a guard that fails on exactly that.
 
 ### Step 2 — deploy both Regions
 
