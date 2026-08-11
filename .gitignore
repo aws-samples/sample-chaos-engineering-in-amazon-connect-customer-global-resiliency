@@ -55,6 +55,11 @@ cdk.out/
 .mx.txt
 .tdgnum.json
 .testflow2.json
-# Security scan exports - findings reports are not source, and may name real resources.
-SecurityFindings/
+# Security scan exports are not source and may name real resources, so the folder's
+# contents are ignored -- EXCEPT the justification doc, which is source and is linked
+# from the README and the template. Note the pattern is 'SecurityFindings/*', not
+# 'SecurityFindings/': a bare directory pattern stops git descending, and the negation
+# below would then never be evaluated.
+SecurityFindings/*
+!SecurityFindings/SECURITY-FINDINGS.md
 *.csv

@@ -26,9 +26,9 @@ where the call is still answered.
 > assumptions hold in production.
 >
 > Before any production use, work through
-> [SECURITY-FINDINGS.md](SECURITY-FINDINGS.md) — it carries the
-> [production disclaimer](SECURITY-FINDINGS.md#production-disclaimer), the
-> [hardening steps](SECURITY-FINDINGS.md#production-hardening), and the disposition and
+> [SecurityFindings/SECURITY-FINDINGS.md](SecurityFindings/SECURITY-FINDINGS.md) — it carries the
+> [production disclaimer](SecurityFindings/SECURITY-FINDINGS.md#production-disclaimer), the
+> [hardening steps](SecurityFindings/SECURITY-FINDINGS.md#production-hardening), and the disposition and
 > justification for all 54 static-analysis findings.
 
 **This file explains what the sample is, how it works, and how to install it.**
@@ -605,7 +605,7 @@ To get notified, create a topic, subscribe to it, then add `AlarmActions` and `O
 `CompositeAlarm`. If you do, encrypt it with a **customer-managed** KMS key whose policy grants
 `cloudwatch.amazonaws.com` `kms:Decrypt` and `kms:GenerateDataKey*`. The default `alias/aws/sns`
 key silently blocks CloudWatch from publishing and its policy cannot be edited — see
-[SECURITY-FINDINGS.md](SECURITY-FINDINGS.md).
+[SecurityFindings/SECURITY-FINDINGS.md](SecurityFindings/SECURITY-FINDINGS.md).
 
 ---
 
@@ -734,7 +734,7 @@ Lex GR enabled, the replica bot is removed when the primary bot is deleted.
 | `docs/` | Architecture diagram and its `awsdac` source |
 | `RUNBOOK.md` | The test procedure |
 | `FIXES.md` | Every defect found against a real ACGR instance, and what is deliberately not a bug |
-| `SECURITY-FINDINGS.md` | Disposition and justification for all 54 static-analysis findings, plus production hardening |
+| `SecurityFindings/SECURITY-FINDINGS.md` | Disposition and justification for all 54 static-analysis findings, plus production hardening |
 
 ```bash
 make help                          # list every target
