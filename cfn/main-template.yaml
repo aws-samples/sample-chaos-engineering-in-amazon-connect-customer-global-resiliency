@@ -130,7 +130,7 @@ Parameters:
       CloudFormation to update the function code. With a FIXED key, CloudFormation compares
       only the property value, sees no change, and leaves the OLD code deployed even though
       the object in S3 was replaced - shipping code and configuration that disagree. That
-      failure is silent: the stack reports UPDATE_COMPLETE. See FIXES.md Fix 21.
+      failure is silent: the stack reports UPDATE_COMPLETE.
 
   FailoverDelaySeconds:
     Type: Number
@@ -143,7 +143,7 @@ Parameters:
       the impaired Region rather than having it repaired out from under them. Detection
       already costs ~90s of Connect metric latency, so the total broken window is roughly
       that plus this value. Set 0 for fastest recovery. Capped at 600 because the handler's
-      timeout must exceed it (see FIXES.md Fix 22).
+      timeout must exceed it.
 
   ContactFlowErrorsThreshold:
     Type: Number
@@ -164,7 +164,7 @@ Parameters:
       Normal fulfillment is <1s; FIS invocation-add-delay drives it to ~31s. Default 7000
       trips on the injected delay but not on normal traffic. (Replaces the former
       RuntimeLambdaErrorsThreshold: AWS/Lex RuntimeLambdaErrors is not emitted for the
-      Amazon Connect voice StartConversation path — see FIXES.md Fix 7.)
+      Amazon Connect voice StartConversation path.)
 
   QueueWaitSecondsThreshold:
     Type: Number
@@ -904,8 +904,8 @@ Resources:
         # S3 (AWS_FIS_CONFIGURATION_LOCATION). Without this the extension logs
         #   "failed to retrieve active fault configurations: ... ListObjectsV2 ... AccessDenied"
         # and then runs the invocation NORMALLY - the experiment reports success while
-        # applying no fault at all. Mirrors LexFulfillmentRole's FISConfigRead. See FIXES.md
-        # Fix 20; the same class of silent failure as the S3 gateway endpoint in Fix 11.
+        # applying no fault at all. Mirrors LexFulfillmentRole's FISConfigRead - the same
+        # class of silent failure as omitting the S3 gateway endpoint.
         - PolicyName: FISConfigRead
           PolicyDocument:
             Version: '2012-10-17'
@@ -963,7 +963,7 @@ Resources:
                   - !GetAtt LexFulfillmentHandler.Arn
                   # Exp 1 targets the DTMF account lookup (invocation-error), so the flow's
                   # InvokeLambdaFunction block errors and ContactFlowErrors attributes the
-                  # fault to Exp 1's own flow. See FIXES.md Fix 18.
+                  # fault to Exp 1's own flow.
                   - !GetAtt AccountLookupHandler.Arn
               - Effect: Allow
                 Action: tag:GetResources
@@ -1039,14 +1039,14 @@ Resources:
                 # Scoped to the TDG's OWN region (PrimaryRegion), not the deploying region.
                 # ${AWS::Region} here meant the paired region's role was scoped to a
                 # us-west-2 TDG ARN that does not exist, so it was denied even with the
-                # correct identifier. See FIXES.md Fix 17.
+                # correct identifier.
                 Resource: !Sub
                   'arn:aws:connect:${PrimaryRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
         - PolicyName: ReadAlarmState
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Needed to re-check the alarm after the failover dwell (FIXES.md Fix 23).
+              # Needed to re-check the alarm after the failover dwell.
               # DescribeAlarms does not support resource-level permissions.
               - Effect: Allow
                 Action: cloudwatch:DescribeAlarms
@@ -1212,7 +1212,7 @@ Resources:
       # Lambda itself does not time out first, LEX hits its own 30s code-hook timeout and
       # records AWS/Lex RuntimeLambdaErrors (the Exp 3 metric) instead of the failure only
       # showing up as an AWS/Lambda timeout error. Normal invocations complete in <1s, so
-      # the larger ceiling has no effect outside the experiment. See FIXES.md (Fix 7).
+      # the larger ceiling has no effect outside the experiment.
       Timeout: 40
       MemorySize: 256
       Code:
@@ -1231,7 +1231,7 @@ Resources:
           # handlers run 57-290 ms), so it never obtains the fault config; only cold starts,
           # which poll during INIT, were affected. Measured: warm 0.7 s vs cold 32.9 s under an
           # active 31 s delay fault. This makes the extension wait for an in-flight poll before
-          # starting the function. See FIXES.md Fix 24.
+          # starting the function.
           AWS_FIS_POLL_MAX_WAIT_MILLISECONDS: '3000'
           # Default is 60 s, which is most of the delay between start-experiment and the
           # fault taking effect. 20 is the MINIMUM the extension accepts: it validates that the
@@ -1239,7 +1239,7 @@ Resources:
           # rejected and silently falls back to 60 s, logging
           #   "Validation: cold-polling interval must be greater or equal to hot-polling
           #    interval (20)"
-          # which is easy to miss. See FIXES.md Fix 24.
+          # which is easy to miss.
           AWS_FIS_SLOW_POLL_INTERVAL_SECONDS: '20'
       VpcConfig:
         SubnetIds:
@@ -1343,7 +1343,6 @@ Resources:
   # hook. That works, but it is not a Connect-native signal and it shares the Lambda
   # namespace with Exp 3, so the two could not be told apart by metric alone. Moving the
   # fault onto a direct-invoke block gives Exp 1 its own ContactFlowName dimension.
-  # See FIXES.md Fix 18.
   #
   # FunctionName is pinned and identical in both regions, which is what makes the flow's
   # $.AwsRegion Lambda ARN valid (ACGR requirement). Do not let CloudFormation auto-name it.
@@ -1403,7 +1402,7 @@ Resources:
           # handlers run 57-290 ms), so it never obtains the fault config; only cold starts,
           # which poll during INIT, were affected. Measured: warm 0.7 s vs cold 32.9 s under an
           # active 31 s delay fault. This makes the extension wait for an in-flight poll before
-          # starting the function. See FIXES.md Fix 24.
+          # starting the function.
           AWS_FIS_POLL_MAX_WAIT_MILLISECONDS: '3000'
           # Default is 60 s, which is most of the delay between start-experiment and the
           # fault taking effect. 20 is the MINIMUM the extension accepts: it validates that the
@@ -1411,7 +1410,7 @@ Resources:
           # rejected and silently falls back to 60 s, logging
           #   "Validation: cold-polling interval must be greater or equal to hot-polling
           #    interval (20)"
-          # which is easy to miss. See FIXES.md Fix 24.
+          # which is easy to miss.
           AWS_FIS_SLOW_POLL_INTERVAL_SECONDS: '20'
       VpcConfig:
         SubnetIds:
@@ -1517,7 +1516,7 @@ Resources:
         Exp 1 (DTMF account lookup, aws:lambda:invocation-error). Fires on AWS/Connect ContactFlowErrors for ConnectChaos-Exp1-Lambda ONLY. Because
         ContactFlowErrors is dimensioned by ContactFlowName, giving each experiment its own
         flow turns Connect's single "a flow failed" metric into independent per-experiment
-        signals - no metric math, no overlap with any other experiment. See FIXES.md Fix 18.
+        signals - no metric math, no overlap with any other experiment.
       Namespace: AWS/Connect
       MetricName: ContactFlowErrors
       Dimensions:
@@ -1551,7 +1550,7 @@ Resources:
         Exp 2 (call audit write, aws:network:disrupt-connectivity). Fires on AWS/Connect ContactFlowErrors for ConnectChaos-Exp2-DynamoDB ONLY. Because
         ContactFlowErrors is dimensioned by ContactFlowName, giving each experiment its own
         flow turns Connect's single "a flow failed" metric into independent per-experiment
-        signals - no metric math, no overlap with any other experiment. See FIXES.md Fix 18.
+        signals - no metric math, no overlap with any other experiment.
       Namespace: AWS/Connect
       MetricName: ContactFlowErrors
       Dimensions:
@@ -1681,7 +1680,7 @@ Resources:
             # The DTMF account-lookup function, invoked DIRECTLY by the Exp 1 flow. Erroring
             # it makes the flow take its InvokeLambdaFunction Error branch, which is what
             # AWS/Connect ContactFlowErrors counts. Targeting the Lex code hook instead would
-            # only raise AWS/Lambda Errors, which Exp 3 also touches. See FIXES.md Fix 18.
+            # only raise AWS/Lambda Errors, which Exp 3 also touches.
             - !GetAtt AccountLookupHandler.Arn
           SelectionMode: ALL
       Actions:
@@ -1792,7 +1791,7 @@ Resources:
       DashboardName: !Sub 'ConnectChaos-${AWS::Region}'
       DashboardBody: !Sub
         - |
-          {"widgets":[{"type":"metric","width":6,"height":6,"x":0,"y":0,"properties":{"title":"Exp 1: ContactFlowErrors (Exp1-Lambda flow)","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":6,"y":0,"properties":{"title":"Exp 2: ContactFlowErrors (Exp2-DynamoDB flow)","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":12,"y":0,"properties":{"title":"Exp 3: Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":18,"y":0,"properties":{"title":"Exp 4: Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":12,"height":6,"x":0,"y":6,"properties":{"title":"Exp 3 corroboration: ContactFlowErrors (Exp3-Latency flow) - OBSERVATION ONLY, not alarmed","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp3-Latency",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":12,"height":6,"x":12,"y":6,"properties":{"title":"Cross-cutting: AWS/Lambda Errors (all functions) - NOT alarmed, see FIXES.md Fix 18","metrics":[["AWS/Lambda","Errors","FunctionName","ConnectChaos-AccountLookup",{"stat":"Sum"}],["AWS/Lambda","Errors","FunctionName","ConnectChaos-CallLogger",{"stat":"Sum"}],["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}}]}
+          {"widgets":[{"type":"metric","width":6,"height":6,"x":0,"y":0,"properties":{"title":"Exp 1: ContactFlowErrors (Exp1-Lambda flow)","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":6,"y":0,"properties":{"title":"Exp 2: ContactFlowErrors (Exp2-DynamoDB flow)","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":12,"y":0,"properties":{"title":"Exp 3: Lex Code-Hook Duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":6,"height":6,"x":18,"y":0,"properties":{"title":"Exp 4: Queue Wait (Overflow, sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":12,"height":6,"x":0,"y":6,"properties":{"title":"Exp 3 corroboration: ContactFlowErrors (Exp3-Latency flow) - OBSERVATION ONLY, not alarmed","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp3-Latency",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}},{"type":"metric","width":12,"height":6,"x":12,"y":6,"properties":{"title":"Cross-cutting: AWS/Lambda Errors (all functions) - NOT alarmed","metrics":[["AWS/Lambda","Errors","FunctionName","ConnectChaos-AccountLookup",{"stat":"Sum"}],["AWS/Lambda","Errors","FunctionName","ConnectChaos-CallLogger",{"stat":"Sum"}],["AWS/Lambda","Errors","FunctionName","LexFulfillmentHandler",{"stat":"Sum"}]],"period":60,"region":"${AWS::Region}"}}]}
         - BotId: !If [CreateLexLocally, !GetAtt ConnectChaosBot.Id, !Ref ReplicatedLexBotId]
           BotAliasId: !If [CreateLexLocally, !GetAtt ConnectChaosBotAlias.BotAliasId, !Ref ReplicatedLexBotAliasId]
 

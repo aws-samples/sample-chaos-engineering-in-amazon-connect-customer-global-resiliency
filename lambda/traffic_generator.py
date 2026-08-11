@@ -113,7 +113,7 @@ def generate_lex_codehook_latency(function_name, count):
     because the FIS invocation-add-delay fault surfaces as a slow code hook — not as
     AWS/Lex RuntimeLambdaErrors on the real Connect voice (StartConversation) path.
     We therefore emit a high Duration datapoint (~31s, mirroring the injected delay)
-    so the alarm fires. See FIXES.md (Fix 7).
+    so the alarm fires.
     """
     for _ in range(count):
         put_metric(

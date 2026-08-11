@@ -68,7 +68,8 @@ REGION = os.environ.get('AWS_REGION', 'unknown')
 #
 # NOTE: unlike LexFulfillmentHandler, whose 40s timeout is load-bearing for Experiment 3,
 # nothing here depends on a long timeout. Experiment 1 prevents execution entirely, so these
-# timeouts are never reached during the experiment. See FIXES.md "Investigated and REJECTED".
+# timeouts are never reached during the experiment. Do NOT add fast-fail timeouts to the Lex
+# code hook: Experiment 3 needs its ~31s delay to return cleanly, not error.
 _DDB_CONFIG = Config(
     connect_timeout=2,
     read_timeout=2,

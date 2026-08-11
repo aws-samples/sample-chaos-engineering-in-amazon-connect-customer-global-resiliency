@@ -26,7 +26,7 @@ Note: Experiment 2's distinct metric, AWS/Connect ContactFlowErrors, is NOT prod
 this fulfillment code hook. A DDB failure reached through Lex is handled by the flow's Lex
 block error branch and surfaces as Lambda Errors / RuntimeLambdaErrors instead. Exp 2's
 ContactFlowErrors is produced by the separate call_logger.py Lambda, which the flow
-invokes directly via an "Invoke AWS Lambda function" block (see FIXES.md, Fix 6).
+invokes directly via an "Invoke AWS Lambda function" block.
 """
 
 import os
@@ -43,7 +43,7 @@ logger.setLevel(logging.INFO)
 TABLE_NAME = os.environ['CUSTOMER_TABLE_NAME']
 CHAOS_TABLE_NAME = os.environ['CHAOS_TABLE_NAME']
 # Lambda sets AWS_REGION in every execution environment. Used to scope Experiment 4's chaos
-# flag per region so the fault is regional rather than replicated (FIXES.md Fix 25).
+# flag per region so the fault is regional rather than replicated.
 REGION = os.environ.get('AWS_REGION', 'unknown')
 
 # Short, bounded DynamoDB timeouts so Experiment 2 (network disruption) fails FAST
@@ -215,7 +215,7 @@ def _check_chaos_flag():
     the caller to a Region reading the same "broken" row, queueing into the same unstaffed
     queue. Scoping by region makes the fault genuinely regional, like Exps 1-3, so the paired
     Region serves normally after failover. Replication still happens and is now harmless: the
-    row copies across, but each Region only ever reads its own key. See FIXES.md Fix 25.
+    row copies across, but each Region only ever reads its own key.
 
     Returns True if chaos is enabled for this region, False otherwise.
     If the config table is unreachable (e.g. during Exp 2's DynamoDB disruption), returns

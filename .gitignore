@@ -61,3 +61,9 @@ cdk.out/
 # every suppression, so nothing here is needed to understand the repository.
 SecurityFindings/
 *.csv
+
+# FIXES.md is the engineering log - every defect found while building this against a real
+# ACGR-paired instance, and the approaches that were investigated and rejected. It is
+# maintainer knowledge rather than sample content, so it is kept local and not published.
+# The code and template carry self-contained explanations for the decisions it covers.
+FIXES.md

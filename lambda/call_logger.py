@@ -32,7 +32,7 @@ AWS/Connect ContactFlowErrors metric that Experiment 2 is designed to observe.
 
 (A DDB failure reached through the Lex fulfillment code hook instead surfaces as
 AWS/Lambda Errors + AWS/Lex RuntimeLambdaErrors and is handled by the Lex block's
-own error branch — it does NOT produce ContactFlowErrors. See FIXES.md, Fix 6.)
+own error branch — it does NOT produce ContactFlowErrors.)
 
 Event shape (Amazon Connect Lambda invocation)
 -----------------------------------------------

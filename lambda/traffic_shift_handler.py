@@ -37,21 +37,21 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Full ARN, never the bare UUID. A TDG resolves by bare ID only in its home region; the
-# paired region gets ResourceNotFoundException. See FIXES.md Fix 17.
+# paired region gets ResourceNotFoundException.
 TRAFFIC_DISTRIBUTION_GROUP_ARN = os.environ['TRAFFIC_DISTRIBUTION_GROUP_ARN']
 MY_REGION = os.environ['MY_REGION']
 PRIMARY_REGION = os.environ['PRIMARY_REGION']
 PAIRED_REGION = os.environ['PAIRED_REGION']
 
-# Deliberate dwell before repairing, so the impaired Region can be experienced. See FIXES.md
-# Fix 22. Detection already costs ~90s of Connect metric latency; this is added on top.
+# Deliberate dwell before repairing, so the impaired Region can be experienced. Detection
+# already costs ~90s of Connect metric latency; this is added on top.
 FAILOVER_DELAY_SECONDS = int(os.environ.get('FAILOVER_DELAY_SECONDS', '0'))
 
 if not TRAFFIC_DISTRIBUTION_GROUP_ARN.startswith('arn:'):
     raise ValueError(
         'TRAFFIC_DISTRIBUTION_GROUP_ARN must be a full ARN, not a bare UUID: '
         f'{TRAFFIC_DISTRIBUTION_GROUP_ARN!r}. A bare ID only resolves in the TDG home '
-        'region, so the paired region could not fail over. See FIXES.md Fix 17.'
+        'region, so the paired region could not fail over.'
     )
 
 connect_client = boto3.client('connect')

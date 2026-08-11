@@ -78,7 +78,7 @@ diagram and still not know:
 - whether the paired Region can answer a call at all.
 
 Every one of those questions was answered "no" at some point while building this sample, on
-infrastructure that reported entirely healthy. [FIXES.md](FIXES.md) records all of them. The
+infrastructure that reported entirely healthy. The
 short version: of the defects that mattered most, **not one was caught by `cfn-lint`, by
 CloudFormation succeeding, or by alarms reporting `OK`.** Each needed a real fault and a real
 phone call.
@@ -169,8 +169,8 @@ Two details in that diagram carry more weight than they look like they do:
 - **The Lambda and Lex ARNs inside the flows use the ACGR runtime token `$.AwsRegion`.** ACGR
   replicates flow content *verbatim*, so a hardcoded Region makes the paired Region invoke the
   **primary's** Lambda and Lex bot. Traffic moves, metrics look correct, and the "healthy" Region
-  is still entirely dependent on the failed one. This is a silent defect, and it was real — see
-  [FIXES.md](FIXES.md) Fixes 8 and 16.
+  is still entirely dependent on the failed one. This is a silent defect, and it was real: both
+  the Lex ARN and the Lambda ARN had to be corrected before failover worked.
 - **Both Regions run their own `TrafficShiftHandler`, and each shifts traffic away from itself.**
   There is no central controller to become a single point of failure. The handler reads the
   current distribution first and no-ops if traffic has already moved, so both Regions alarming at
@@ -256,8 +256,7 @@ slow but still returns cleanly. It is observed as latency, not as an error.
   fired. A latency threshold is not merely the more honest measurement for a latency fault, it is
   the only one that works.
 - **Why not `AWS/Lex RuntimeLambdaErrors`?** It is never emitted for this bot on Connect's real
-  voice path — established by `list-metrics` over repeated real calls (FIXES.md Fix 7). Do not
-  "restore" it.
+  voice path — established by `list-metrics` over repeated real calls. Do not "restore" it.
 - **Needs ~55 s to arm**, as with Experiment 1.
 
 ### Experiment 4 — a bad config value parks the caller on an unstaffed queue
@@ -290,7 +289,6 @@ dashboard green, every alarm correct, traffic moved, customer still broken.
 Multi-Region architectures routinely fail this way — a poisoned config row, a bad feature flag, a
 corrupt cache entry, a schema migration. All replicate faithfully to the standby, which is the
 one thing you did not want replicated. Do not "simplify" the flag back to a single shared key.
-See [FIXES.md](FIXES.md) Fix 25.
 
 ---
 
@@ -326,8 +324,12 @@ experiment duration                            : PT5M  (FISExperimentDuration)
 ```
 
 So the usable window **opens** at ~55 s and closes when the experiment ends, leaving roughly four
-minutes to place your call. Full detail, including two other undocumented FIS behaviours found
-alongside this, is in [FIXES.md](FIXES.md) Fix 24.
+minutes to place your call.
+
+Two further undocumented behaviours were measured alongside this: the extension silently falls
+back to a 60 s interval if `AWS_FIS_SLOW_POLL_INTERVAL_SECONDS` is set below 20, and FIS refuses
+to start an experiment whose stop-condition alarm is not already `OK`, failing in about ten
+seconds.
 
 **Experiment 2 needs no wait** — it is network-level, applies immediately, and stays applied for
 the whole experiment. **Experiment 4 needs no wait** — the flag is read on the next call.
@@ -381,8 +383,6 @@ consequences:
 - **If you reset while a handler is dwelling and the alarm is genuinely still in `ALARM`, the
   shift still lands** after the dwell. Wait out the dwell before resetting, or reset twice about
   130 s apart.
-
-See [FIXES.md](FIXES.md) Fixes 22 and 23.
 
 ---
 
@@ -518,7 +518,7 @@ alarms, and a smoke invoke of the traffic-shift handler. It must exit `0` before
 > cannot serve a call until the *alias* replica reports `Available` (~90 s, versus ~30 s for the
 > bot). The `Replication` property on `AWS::Lex::Bot` is also not sufficient evidence on its own:
 > on one deployment the replica it created was present after deploy and had vanished 40 minutes
-> later with no CloudTrail record either way (FIXES.md Fix 14). `make verify` checks this.
+> later with no CloudTrail record either way. `make verify` checks this.
 
 **Now go to [RUNBOOK.md](RUNBOOK.md)** for the baseline call and the four experiments.
 
@@ -770,7 +770,6 @@ Lex GR enabled, the replica bot is removed when the primary bot is deleted.
 | `scripts/wire-paired-flow.sh` | Post-deploy, **only** when `EnableLexGlobalResiliency=false` |
 | `docs/` | Architecture diagram and its `awsdac` source |
 | `RUNBOOK.md` | The test procedure |
-| `FIXES.md` | Every defect found against a real ACGR instance, and what is deliberately not a bug |
 
 ```bash
 make help                          # list every target
@@ -819,15 +818,6 @@ stage it through S3. `make deploy` does this automatically. For StackSets use `-
 > brand-new stack that fails, discarding the events you need. To keep it for inspection use
 > `aws cloudformation create-stack --on-failure DO_NOTHING`, read `describe-stack-events`, then
 > delete manually.
-
----
-
-## Known findings
-
-**[FIXES.md](FIXES.md)** records every defect found by deploying this against a real ACGR-paired
-instance, the fix applied, and the things that are deliberately **not** bugs. Read it before
-changing an experiment's metric — several obvious-looking "fixes" have already been proven wrong
-by real calls.
 
 ## License
 

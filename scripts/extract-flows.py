@@ -77,7 +77,7 @@ def extract(text, logical_id):
 # are validated here instead of being discovered by a failed stack update.
 #
 # The last two entries were established by creating throwaway flows against the real API,
-# because the flow-language reference does not state either of them (FIXES.md Fix 19):
+# because the flow-language reference does not state either of them:
 #   StoreInput=True  -> InputTimeLimitExceeded is REJECTED (a timeout takes the Success
 #                       branch with the stored value set to the literal string "Timeout"),
 #                       and InputValidation is REQUIRED.
@@ -124,7 +124,7 @@ def validate(name, flow):
                 if "InputTimeLimitExceeded" in errs:
                     problems.append(f"{ident}: StoreInput=True must NOT declare "
                                     "InputTimeLimitExceeded - a timeout takes the Success "
-                                    "branch with the value 'Timeout' (FIXES.md Fix 19)")
+                                    "branch with the value 'Timeout'")
                 if "InputValidation" not in a["Parameters"]:
                     problems.append(f"{ident}: StoreInput=True requires InputValidation")
             if stored == "False" and "NoMatchingCondition" not in errs:
@@ -140,9 +140,9 @@ def validate(name, flow):
     for service in ("lambda", "lex"):
         if f"arn:aws:{service}:" in body and f"arn:aws:{service}:$.AwsRegion:" not in body:
             problems.append(f"a {service} ARN is pinned to one Region - the paired Region "
-                            "would use the wrong one (FIXES.md Fix 8 / Fix 16)")
+                            "would use the wrong one")
     if "Connected in region $.AwsRegion" not in body:
-        problems.append("does not announce the serving Region (FIXES.md Fix 18)")
+        problems.append("does not announce the serving Region")
 
     if problems:
         raise SystemExit(f"ERROR: {name} would be rejected or is ACGR-unsafe:\n  - "

@@ -42,8 +42,7 @@ ACGR replicates flow content **verbatim**, so a hardcoded Region makes the paire
 the *primary's* dependencies — after failover your "healthy" Region still depends on the one you
 just declared unhealthy. The failure is invisible unless you deploy both Regions and check which
 Region's Lambda logged the call. It is preserved verbatim by the generator because it is a Connect
-**runtime** token, not a CloudFormation reference. See `FIXES.md` Fix 8 (Lex ARN) and Fix 16
-(Lambda ARN).
+**runtime** token, not a CloudFormation reference.
 
 `$.AwsRegion` works for Lambda and Lex ARNs only —
 [ACGR requirements](https://docs.aws.amazon.com/connect/latest/adminguide/connect-global-resiliency-requirements.html).
@@ -55,7 +54,7 @@ Connect-internal ARNs such as queues are remapped by ACGR itself and need no tok
 
 **2. The Lex block needs a prompt.** `ConnectParticipantWithLexBot` must carry `Text` (or
 `PromptId` / `SSML` / `Media` / `LexInitializationData`) as well as the alias ARN, or the flow
-fails to create with a generic `InvalidContactFlowException` (`FIXES.md` Fix 2).
+fails to create with a generic `InvalidContactFlowException`.
 
 **3. Error types are per-action and not interchangeable.** Only `NoMatchingError`,
 `NoMatchingCondition`, `InputTimeLimitExceeded` and `InvalidPhoneNumber` are valid, and **which
@@ -68,7 +67,7 @@ ones are permitted differs per action**:
 | `GetParticipantInput` with `StoreInput=True` | must **not** declare `NoMatchingCondition`, and *must* supply `InputValidation` |
 
 **4. `StoreInput` changes which error types are mandatory.** Two undocumented rules, found by
-nine throwaway `CreateContactFlow` calls (`FIXES.md` Fix 19):
+nine throwaway `CreateContactFlow` calls:
 
 - `StoreInput: "True"` must **not** declare `InputTimeLimitExceeded`
 - `StoreInput: "False"` **must** declare `NoMatchingCondition`

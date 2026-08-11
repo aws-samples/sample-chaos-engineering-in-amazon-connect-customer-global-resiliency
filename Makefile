@@ -26,7 +26,7 @@ LAMBDAS := lex_fulfillment_handler traffic_shift_handler traffic_generator call_
 # Content hash of the handler SOURCES. Goes into the S3 key of every function so that a code
 # change necessarily changes Code.S3Key and CloudFormation updates the function. Hashing the
 # sources, not the zips: zip archives embed timestamps, so hashing them would change the key
-# on every build even with identical code. See FIXES.md Fix 21.
+# on every build even with identical code.
 LAMBDA_CODE_VERSION := $(shell cat $(LAMBDA_DIR)/*.py | shasum | cut -c1-12)
 ZIPS    := $(addprefix $(BUILD_DIR)/,$(addsuffix .zip,$(LAMBDAS)))
 
@@ -246,7 +246,7 @@ post-deploy:
 	        --query "botReplicaSummaries[?replicaRegion=='$(PAIRED_REGION)'].botReplicaStatus|[0]" \
 	        --output text 2>/dev/null); \
 	  if [ "$$R" != "Enabled" ]; then \
-	    echo "    bot replica in $(PAIRED_REGION) is '$$R' - creating it (see FIXES.md Fix 14)"; \
+	    echo "    bot replica in $(PAIRED_REGION) is '$$R' - creating it"; \
 	    aws lexv2-models create-bot-replica --bot-id $$BOT --replica-region $(PAIRED_REGION) \
 	      --region $(PRIMARY_REGION) >/dev/null || true; \
 	  fi; \
@@ -386,7 +386,7 @@ verify:
 	        --output text 2>/dev/null); \
 	  if [ -n "$$AR" ]; then echo "  PASS  Lex ALIAS replica(s) Available in $(PAIRED_REGION): $$AR"; \
 	  else echo "  FAIL  no Lex ALIAS replica Available - the bot replica alone is NOT enough,"; \
-	       echo "        the flow's \$$.AwsRegion ARN resolves to the ALIAS (FIXES.md Fix 14)"; FAIL=1; fi; \
+	       echo "        the flow's \$$.AwsRegion ARN resolves to the ALIAS"; FAIL=1; fi; \
 	fi; \
 	B=$$(aws connect list-bots --instance-id $$IID --lex-version V2 --region $(PAIRED_REGION) \
 	     --query "LexBots[].LexV2Bot.AliasArn" --output text 2>/dev/null); \
@@ -444,7 +444,7 @@ verify:
 	  else \
 	    echo "  FAIL  $$R: TrafficShiftHandler returned $$OUT - it cannot even import."; \
 	    echo "        Almost certainly STALE CODE: CloudFormation does not update a"; \
-	    echo "        function whose Code.S3Key is unchanged. See FIXES.md Fix 21."; \
+	    echo "        function whose Code.S3Key is unchanged."; \
 	    FAIL=1; \
 	  fi; \
 	done; \

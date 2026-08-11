@@ -651,5 +651,7 @@ whole failover chain. **Step R after every one.**
 | The second experiment proves nothing | Traffic still at 0% primary | Step R |
 | `DELETE_FAILED` on cleanup | FIS config bucket not empty | Empty `ccfis-…` first — see [README → Cleanup](README.md#cleanup) |
 
-Defects already found and fixed, plus the things that are deliberately **not** bugs, are in
-[FIXES.md](FIXES.md). Read it before changing an experiment's metric.
+Before changing an experiment's metric, re-read the reasoning in
+[README.md](README.md#the-four-experiments). Several obvious-looking "improvements" — alarming
+Exp 3 on `ContactFlowErrors`, restoring `AWS/Lex RuntimeLambdaErrors`, sharing one chaos flag
+across Regions — have already been proven wrong by real calls.
