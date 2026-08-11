@@ -211,10 +211,10 @@ def _check_chaos_flag():
     The key is region-scoped on purpose: `chaos_flag#<region>`.
 
     The config table is a Global Table, so a single shared key would replicate the fault to
-    the paired Region and Experiment 4 could never demonstrate recovery - failover would move
+    the replica Region and Experiment 4 could never demonstrate recovery - traffic transition would move
     the caller to a Region reading the same "broken" row, queueing into the same unstaffed
-    queue. Scoping by region makes the fault genuinely regional, like Exps 1-3, so the paired
-    Region serves normally after failover. Replication still happens and is now harmless: the
+    queue. Scoping by region makes the fault genuinely regional, like Exps 1-3, so the replica
+    Region serves normally after traffic transition. Replication still happens and is now harmless: the
     row copies across, but each Region only ever reads its own key.
 
     Returns True if chaos is enabled for this region, False otherwise.

@@ -114,7 +114,17 @@ ALLOWED_LITERALS: dict[str, str] = {
 }
 
 # Binary or generated files with nothing to review.
-SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".pyc", ".ico")
+# Binary and compressed formats are skipped. Reading them as text with errors="ignore"
+# discards invalid bytes and joins the survivors into character sequences that never existed
+# in the file, which produces confident false positives. A compressed image inside a .docx
+# fabricated a plausible 10-character Lex id this way. Office documents are also gitignored,
+# so they cannot reach the repository regardless.
+SKIP_SUFFIXES = (
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf",
+    ".zip", ".gz", ".tar", ".whl",
+    ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".pyc",
+)
 # SecurityFindings holds scanner exports. They are gitignored, so they can never be committed,
 # and they legitimately quote resource names from a real deployment. Scanning them would block
 # `make lint` on a file that is not part of the source tree.

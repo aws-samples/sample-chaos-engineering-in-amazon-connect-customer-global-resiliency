@@ -1,8 +1,8 @@
-# Amazon Connect Chaos Engineering with FIS and ACGR Failover
+# Amazon Connect Chaos Engineering with FIS and ACGR Traffic transition
 
 Inject controlled faults into a live Amazon Connect contact centre with **AWS Fault Injection
 Service (FIS)**, watch CloudWatch attribute the failure to the component that broke, and verify
-that **Amazon Connect Global Resiliency (ACGR)** shifts telephony traffic to the paired Region —
+that **Amazon Connect Global Resiliency (ACGR)** shifts telephony traffic to the replica Region —
 where the call is still answered.
 
 > **Requires AWS Enterprise Support.** ACGR is onboarded through your AWS account team. This
@@ -42,8 +42,8 @@ here, test from there.
 - [Architecture](#architecture)
 - [The four experiments](#the-four-experiments)
 - [Why you must wait before calling](#why-you-must-wait-before-calling-experiments-1-and-3)
-- [Detection and failover](#detection-and-failover)
-- [Why failover is deliberately delayed](#why-failover-is-deliberately-delayed)
+- [Detection and traffic transition](#detection-and-traffic transition)
+- [Why traffic transition is deliberately delayed](#why-traffic transition-is-deliberately-delayed)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Parameters](#parameters)
@@ -73,9 +73,9 @@ diagram and still not know:
 - whether a broken account-lookup Lambda produces a **metric that names the Lambda**, or just a
   generic "flow error" indistinguishable from four other causes;
 - whether your alarm thresholds can actually fire on the volume a single test call produces;
-- whether failing over to the paired Region **helps**, or whether the paired Region is quietly
+- whether failing over to the replica Region **helps**, or whether the replica Region is quietly
   reaching back into the Region you just declared unhealthy;
-- whether the paired Region can answer a call at all.
+- whether the replica Region can answer a call at all.
 
 Every one of those questions was answered "no" at some point while building this sample, on
 infrastructure that reported entirely healthy. The
@@ -84,7 +84,7 @@ CloudFormation succeeding, or by alarms reporting `OK`.** Each needed a real fau
 phone call.
 
 That is the argument for chaos engineering here. You are not testing whether AWS works. You are
-testing whether **your detection and your failover work**, and the only way to know is to break
+testing whether **your detection and your traffic transition work**, and the only way to know is to break
 something on purpose while someone is on the line.
 
 ---
@@ -107,7 +107,7 @@ FIS gives four things this sample depends on:
 
 Two consequences of the stop-condition design are worth knowing up front:
 
-- **Failover still happens** when FIS stops the experiment. The alarm, EventBridge and the
+- **Traffic transition still happens** when FIS stops the experiment. The alarm, EventBridge and the
   traffic shift are independent of FIS; halting the fault does not undo the detection.
 - **FIS refuses to start an experiment whose stop-condition alarm is not already `OK`.** It fails
   within about ten seconds with an explicit message. This is why the runbook's reset step waits
@@ -131,11 +131,11 @@ the fault being modelled is a bad configuration value rather than an infrastruct
                         │  Traffic Distribution Group      │
                         │           (ACGR)                 │
                         │  normal:   IAD 100% | PDX 0%     │
-                        │  failover: IAD 0%   | PDX 100%   │
+                        │  transitioned: IAD 0% | PDX 100% │
                         └───────────────┬──────────────────┘
                                         │
              ┌──────────────────────────┴──────────────────────────┐
-       PRIMARY (us-east-1)                              PAIRED (us-west-2)
+       SOURCE (us-east-1)                              REPLICA (us-west-2)
        ┌──────────────────────┐                    ┌──────────────────────┐
        │ Connect instance     │                    │ Connect instance     │
        │  (same instance id) ─┼── ACGR replicates ►│  (same instance id)  │
@@ -167,10 +167,10 @@ menu. The digit you press selects which experiment's flow runs.
 Two details in that diagram carry more weight than they look like they do:
 
 - **The Lambda and Lex ARNs inside the flows use the ACGR runtime token `$.AwsRegion`.** ACGR
-  replicates flow content *verbatim*, so a hardcoded Region makes the paired Region invoke the
-  **primary's** Lambda and Lex bot. Traffic moves, metrics look correct, and the "healthy" Region
+  replicates flow content *verbatim*, so a hardcoded Region makes the replica Region invoke the
+  **source's** Lambda and Lex bot. Traffic moves, metrics look correct, and the "healthy" Region
   is still entirely dependent on the failed one. This is a silent defect, and it was real: both
-  the Lex ARN and the Lambda ARN had to be corrected before failover worked.
+  the Lex ARN and the Lambda ARN had to be corrected before traffic transition worked.
 - **Both Regions run their own `TrafficShiftHandler`, and each shifts traffic away from itself.**
   There is no central controller to become a single point of failure. The handler reads the
   current distribution first and no-ops if traffic has already moved, so both Regions alarming at
@@ -212,7 +212,7 @@ into `120345` and once into `0` — indistinguishable from a broken lookup.
 > **On cascades — read this before you judge a result.** Every fault here ultimately flows
 > through a Lambda, so `AWS/Lambda Errors` also rises during Experiments 1, 2 and 3. That is
 > inherent to a synchronous IVR call path, not a defect. The composite alarm ORs all four
-> component alarms, so failover happens regardless. When demonstrating a *specific* experiment,
+> component alarms, so traffic transition happens regardless. When demonstrating a *specific* experiment,
 > watch **that experiment's own alarm**, never the composite.
 
 ### Experiment 1 — the account-lookup Lambda fails
@@ -279,7 +279,7 @@ the contact there. It waits indefinitely and `LongestQueueWaitTime` climbs.
 
 **The flag is Region-scoped (`chaos_flag#<region>`) on purpose, and this is the most important
 lesson in the sample.** The config table is a DynamoDB Global Table. A single shared key would
-replicate the fault to the paired Region, and failover could never recover: the caller would land
+replicate the fault to the replica Region, and traffic transition could never recover: the caller would land
 in a Region reading the same broken row and queueing into the same unstaffed queue. Every
 dashboard green, every alarm correct, traffic moved, customer still broken.
 
@@ -336,50 +336,50 @@ the whole experiment. **Experiment 4 needs no wait** — the flag is read on the
 
 ---
 
-## Detection and failover
+## Detection and traffic transition
 
 ```
 any component alarm → composite alarm ALARM
   → EventBridge rule
     → TrafficShiftHandler
-      → hold for FailoverDelaySeconds        (default 120 s)
+      → hold for Traffic transitionDelaySeconds        (default 120 s)
         → re-check the triggering alarm is STILL in ALARM
           → UpdateTrafficDistribution:  this Region 0%  /  other Region 100%
 ```
 
-New inbound calls then route to the paired Region. **Calls already in progress are not moved** —
+New inbound calls then route to the replica Region. **Calls already in progress are not moved** —
 ACGR shifts telephony traffic, it does not migrate live contacts.
 
 **Recovery is deliberately manual.** Alarms returning to `OK` shift nothing back; the handler
 ignores `OK` events by design, so an operator confirms the fault is genuinely resolved before
 customers are routed back. The runbook's reset step does this.
 
-## Why failover is deliberately delayed
+## Why traffic transition is deliberately delayed
 
-`FailoverDelaySeconds` (default **120**, maximum 600) holds the traffic shift after the alarm
+`Traffic transitionDelaySeconds` (default **120**, maximum 600) holds the traffic shift after the alarm
 fires. Setting it to `0` shifts immediately.
 
-The delay exists because **failover that is too fast is impossible to demonstrate.** Without it,
+The delay exists because **traffic transition that is too fast is impossible to demonstrate.** Without it,
 the sequence from alarm to traffic shift completed in about two seconds. By the time you had
 finished reading the alarm state in the console, traffic had already moved — so nobody ever
-experienced the impaired Region, and the thing the sample exists to show happened invisibly. The
+experienced the imreplica Region, and the thing the sample exists to show happened invisibly. The
 dwell gives you a window to place a call *into the broken Region*, hear the failure prompt for
 yourself, and only then watch traffic move.
 
 It also reflects something real. Shifting an entire contact centre's telephony is not free: calls
-in progress stay where they are, agents in the paired Region pick up the load, and a transient
+in progress stay where they are, agents in the replica Region pick up the load, and a transient
 blip is not worth that disruption. A short dwell is a crude but genuine form of flap damping.
 
 One behaviour the dwell introduced, and how it is handled: a sleeping handler was **silently
 undoing a reset.** You would reset traffic to 100/0, and a handler that had started its dwell
 before the reset would wake up and shift traffic away again. The handler now **re-reads the
-triggering alarm after the dwell and abandons the failover if it is no longer in `ALARM`.** Two
+triggering alarm after the dwell and abandons the traffic transition if it is no longer in `ALARM`.** Two
 consequences:
 
-- **`aws cloudwatch set-alarm-state` can no longer test failover while a dwell is configured.** A
+- **`aws cloudwatch set-alarm-state` can no longer test traffic transition while a dwell is configured.** A
   forced alarm state is a temporary override that CloudWatch reverts within ~50 s, so it expires
   inside the 120 s dwell and the handler correctly declines to act. To test the mechanism alone,
-  redeploy with `FAILOVER_DELAY_SECONDS=0`.
+  redeploy with `REGION_SWITCH_DELAY_SECONDS=0`.
 - **If you reset while a handler is dwelling and the alarm is genuinely still in `ALARM`, the
   shift still lands** after the dwell. Wait out the dwell before resetting, or reset twice about
   130 s apart.
@@ -411,7 +411,7 @@ deploy anything.
 
 The **only deployable artifact is `cfn/main-template.yaml`.** It deploys **twice** — once per
 Region — and the `IsPrimaryRegion` condition controls what goes where. The global tables, all
-five contact flows, the overflow queue and its hours of operation are created only in the primary
+five contact flows, the overflow queue and its hours of operation are created only in the source
 Region and replicated by ACGR and DynamoDB.
 
 ### Step 1 — set your environment
@@ -421,12 +421,12 @@ You supply **two** values; the rest are derived. Both are UUIDs:
 | Variable | What it is | Example (not a real value) | How to find yours |
 |---|---|---|---|
 | `INSTANCE_ID` | Connect instance ID. An ACGR replica shares the **same** ID in both Regions, which is how you recognise a pair | `EXAMPLE1-2222-3333-4444-555555555555` | `aws connect list-instances --region us-east-1` |
-| `TDG_ID` | The Traffic Distribution Group that failover updates | `EXAMPLE2-6666-7777-8888-999999999999` | `aws connect list-traffic-distribution-groups --region us-east-1` |
+| `TDG_ID` | The Traffic Distribution Group that traffic transition updates | `EXAMPLE2-6666-7777-8888-999999999999` | `aws connect list-traffic-distribution-groups --region us-east-1` |
 
 ```bash
 export STACK=connect-chaos-sample
-export PRIMARY_REGION=us-east-1
-export PAIRED_REGION=us-west-2
+export SOURCE_REGION=us-east-1
+export REPLICA_REGION=us-west-2
 export ACCT=$(aws sts get-caller-identity --query Account --output text)
 
 # REPLACE both — the values below only show the expected shape.
@@ -434,8 +434,8 @@ export INSTANCE_ID=EXAMPLE1-2222-3333-4444-555555555555
 export TDG_ID=EXAMPLE2-6666-7777-8888-999999999999
 
 # An ACGR replica shares the SAME instance id, so the two ARNs differ only by Region.
-export PRIMARY_INSTANCE_ARN=arn:aws:connect:$PRIMARY_REGION:$ACCT:instance/$INSTANCE_ID
-export PAIRED_INSTANCE_ARN=arn:aws:connect:$PAIRED_REGION:$ACCT:instance/$INSTANCE_ID
+export SOURCE_INSTANCE_ARN=arn:aws:connect:$SOURCE_REGION:$ACCT:instance/$INSTANCE_ID
+export REPLICA_INSTANCE_ARN=arn:aws:connect:$REPLICA_REGION:$ACCT:instance/$INSTANCE_ID
 ```
 
 `EXAMPLE…` is not valid hexadecimal, so a UUID still containing it has not been replaced —
@@ -444,47 +444,47 @@ export PAIRED_INSTANCE_ARN=arn:aws:connect:$PAIRED_REGION:$ACCT:instance/$INSTAN
 ### Step 2 — deploy both Regions
 
 ```bash
-# Creates the code bucket, zips and uploads the Lambdas, deploys the primary Region,
-# reads the Lex GR bot/alias ids from its outputs, then deploys the paired Region.
+# Creates the code bucket, zips and uploads the Lambdas, deploys the source Region,
+# reads the Lex GR bot/alias ids from its outputs, then deploys the replica Region.
 make deploy-pair STACK=$STACK \
-  PRIMARY_REGION=$PRIMARY_REGION PAIRED_REGION=$PAIRED_REGION \
-  PRIMARY_INSTANCE_ARN=$PRIMARY_INSTANCE_ARN \
-  PAIRED_INSTANCE_ARN=$PAIRED_INSTANCE_ARN \
+  SOURCE_REGION=$SOURCE_REGION REPLICA_REGION=$REPLICA_REGION \
+  SOURCE_INSTANCE_ARN=$SOURCE_INSTANCE_ARN \
+  REPLICA_INSTANCE_ARN=$REPLICA_INSTANCE_ARN \
   TDG_ID=$TDG_ID
 ```
 
-`deploy-pair` creates the code bucket, zips and uploads the Lambdas, deploys the primary Region,
-reads the Lex GR bot and alias IDs from its outputs, then deploys the paired Region with those
+`deploy-pair` creates the code bucket, zips and uploads the Lambdas, deploys the source Region,
+reads the Lex GR bot and alias IDs from its outputs, then deploys the replica Region with those
 IDs.
 
-**Both stacks must be left standing.** The paired Region cannot answer a call without its own
+**Both stacks must be left standing.** The replica Region cannot answer a call without its own
 Lambdas, and that is the single most important thing this sample proves.
 
 <details>
 <summary>Deploying one Region at a time</summary>
 
 ```bash
-# Deploy ONE Region. Run it again for the paired Region, adding the replicated Lex ids.
-make deploy STACK=$STACK REGION=$PRIMARY_REGION \
-  CONNECT_INSTANCE_ARN=$PRIMARY_INSTANCE_ARN \
+# Deploy ONE Region. Run it again for the replica Region, adding the replicated Lex ids.
+make deploy STACK=$STACK REGION=$SOURCE_REGION \
+  CONNECT_INSTANCE_ARN=$SOURCE_INSTANCE_ARN \
   CONNECT_INSTANCE_ID=$INSTANCE_ID TDG_ID=$TDG_ID
 ```
 
-Then read `LexBotId` and `LexBotAliasId` from the primary stack outputs and pass them to the
-paired Region as `REPLICATED_LEX_BOT_ID` and `REPLICATED_LEX_BOT_ALIAS_ID`.
+Then read `LexBotId` and `LexBotAliasId` from the source stack outputs and pass them to the
+replica Region as `REPLICATED_LEX_BOT_ID` and `REPLICATED_LEX_BOT_ALIAS_ID`.
 
 **Tokyo/Osaka:** Lex GR does not support `ap-northeast-1`↔`ap-northeast-3`. Deploy both with
-`ENABLE_LEX_GR=false`, omit the replicated IDs, then run `./scripts/wire-paired-flow.sh` to point
-the paired flow at its own bot.
+`ENABLE_LEX_GR=false`, omit the replicated IDs, then run `./scripts/wire-replica-flow.sh` to point
+the replica flow at its own bot.
 </details>
 
 ### Step 3 — the three things CloudFormation cannot do
 
 ```bash
 # The three steps CloudFormation cannot do: seed the tables, associate the phone number
-# with ConnectChaos-Menu, and reset traffic to 100% primary. Idempotent, safe to re-run.
+# with ConnectChaos-Menu, and reset traffic to 100% source. Idempotent, safe to re-run.
 make post-deploy STACK=$STACK \
-  PRIMARY_REGION=$PRIMARY_REGION PAIRED_REGION=$PAIRED_REGION \
+  SOURCE_REGION=$SOURCE_REGION REPLICA_REGION=$REPLICA_REGION \
   INSTANCE_ID=$INSTANCE_ID TDG_ID=$TDG_ID
 ```
 
@@ -494,7 +494,7 @@ make post-deploy STACK=$STACK \
 |---|---|
 | Seed the DynamoDB tables (customer `12345`, chaos flag off in **both** Regions) | Data, not infrastructure |
 | **Associate the phone number with `ConnectChaos-Menu`** | The number belongs to the TDG, not the stack, and no CloudFormation resource models the number → flow link |
-| Reset traffic to 100% primary / 0% paired | Live routing state |
+| Reset traffic to 100% source / 0% replica | Live routing state |
 
 > **⚠️ Skipping the association is a silent failure.** Every resource reports `CREATE_COMPLETE`,
 > every alarm reports `OK`, and calls simply never enter the flow with nothing indicating why.
@@ -505,16 +505,16 @@ make post-deploy STACK=$STACK \
 
 ```bash
 # 29 checks across both Regions. Must exit 0 before you place a single test call.
-make verify STACK=$STACK PRIMARY_REGION=$PRIMARY_REGION \
-  PAIRED_REGION=$PAIRED_REGION TDG_ID=$TDG_ID
+make verify STACK=$STACK SOURCE_REGION=$SOURCE_REGION \
+  REPLICA_REGION=$REPLICA_REGION TDG_ID=$TDG_ID
 ```
 
-29 checks across both Regions: stack status, whether the paired Region can actually serve a call,
+29 checks across both Regions: stack status, whether the replica Region can actually serve a call,
 Lex replication, the `$.AwsRegion` tokens in all five flows, seed data, the traffic split, the
 alarms, and a smoke invoke of the traffic-shift handler. It must exit `0` before you test.
 
 > **⚠️ Lex GR needs the ALIAS replica, not just the bot replica.** The flow resolves
-> `arn:aws:lex:$.AwsRegion:…:bot-alias/<botId>/<aliasId>` to the **alias**, so the paired Region
+> `arn:aws:lex:$.AwsRegion:…:bot-alias/<botId>/<aliasId>` to the **alias**, so the replica Region
 > cannot serve a call until the *alias* replica reports `Available` (~90 s, versus ~30 s for the
 > bot). The `Replication` property on `AWS::Lex::Bot` is also not sufficient evidence on its own:
 > on one deployment the replica it created was present after deploy and had vanished 40 minutes
@@ -530,42 +530,42 @@ alarms, and a smoke invoke of the traffic-shift handler. It must exit `0` before
 |-----------|:---:|---|---|
 | `ConnectInstanceArn` | ✓ | — | ACGR instance ARN for **this** Region |
 | `ConnectInstanceId` | ✓ | — | Instance UUID for **this** Region |
-| `TrafficDistributionGroupId` | ✓ | — | The TDG that failover updates |
+| `TrafficDistributionGroupId` | ✓ | — | The TDG that traffic transition updates |
 | `LambdaCodeBucket` | ✓ | — | Bucket holding the Lambda zips; `make` creates and fills it |
 | `CreateVpc` | | `true` | Create VPC, subnets and free DynamoDB/S3 gateway endpoints |
 | `VpcCidr` / `SubnetACidr` / `SubnetBCidr` | | `10.20.0.0/16`, `.1.0/24`, `.2.0/24` | Only when `CreateVpc=true` |
 | `LambdaSubnetIdA` / `IdB` / `LambdaSecurityGroupId` | | `''` | **Only when `CreateVpc=false`.** A Rule enforces all three |
 | `FISExtensionLayerArn` | | *SSM path* | Auto-resolves per Region. Override only to pin a version |
 | `PrimaryRegion` / `PairedRegion` | | `us-east-1` / `us-west-2` | Must be an ACGR pair |
-| `EnableAutoFailover` | | `false` | Deploy EventBridge and `TrafficShiftHandler` |
+| `EnableAutoTraffic transition` | | `false` | Deploy EventBridge and `TrafficShiftHandler` |
 | `EnableLexGlobalResiliency` | | `true` | Replicate the bot via Lex GR (IAD↔PDX, LHR↔FRA) |
-| `ReplicatedLexBotId` / `…AliasId` | | `''` | Paired Region only; from the primary stack outputs |
+| `ReplicatedLexBotId` / `…AliasId` | | `''` | Replica Region only; from the source stack outputs |
 | `EnableTrafficGenerator` | | `false` | Synthetic metrics — drive alarms without phone calls |
 | `DashboardType` | | `regional` | `regional` or `unified` |
-| `PairedConnectInstanceId` | | `''` | Primary only, when `DashboardType=unified` |
+| `PairedConnectInstanceId` | | `''` | Source only, when `DashboardType=unified` |
 | `ContactFlowErrorsThreshold` | | `0` | Exps 1 and 2. `0` means one flow error trips the alarm. Raise for production monitoring |
 | `LexCodeHookLatencyThresholdMs` | | `7000` | Exp 3 |
 | `QueueWaitSecondsThreshold` | | `60` | Exp 4 |
-| `FailoverDelaySeconds` | | `120` | Hold the failover this long after the alarm. Max 600. `0` shifts immediately |
+| `Traffic transitionDelaySeconds` | | `120` | Hold the traffic transition this long after the alarm. Max 600. `0` shifts immediately |
 | `FISExperimentDuration` | | `PT5M` | ISO-8601 |
 
 ---
 
 ## Resources deployed
 
-| Resource | Primary | Paired | How |
+| Resource | Source | Replica | How |
 |----------|:---:|:---:|---|
 | VPC, 2 private subnets, route table, SG | ✓ | ✓ | Created when `CreateVpc=true` (default) |
 | Gateway endpoints — DynamoDB + S3 | ✓ | ✓ | Free. **S3 is required by the FIS extension** |
-| Contact flows ×5 — `Menu` + one per experiment | ✓ | ✓ | Created in primary, ACGR replicates |
-| Queue `ConnectChaos-Overflow` + 24×7 hours | ✓ | ✓ | Created in primary, ACGR replicates |
-| Lex V2 bot + version + alias | ✓ | ✓ | Primary creates; Lex GR replicates (same IDs) |
+| Contact flows ×5 — `Menu` + one per experiment | ✓ | ✓ | Created in source, ACGR replicates |
+| Queue `ConnectChaos-Overflow` + 24×7 hours | ✓ | ✓ | Created in source, ACGR replicates |
+| Lex V2 bot + version + alias | ✓ | ✓ | Source creates; Lex GR replicates (same IDs) |
 | Connect ↔ Lex `IntegrationAssociation` | ✓ | ✓ | Per Region, against its local bot |
 | `LexFulfillmentHandler` (40 s timeout, VPC, FIS layer) | ✓ | ✓ | Same name in both Regions — an ACGR requirement |
 | `ConnectChaos-CallLogger` (VPC) | ✓ | ✓ | Invoked directly by the Exp 2 flow |
 | `ConnectChaos-AccountLookup` (VPC, FIS layer) | ✓ | ✓ | Invoked directly by the Exp 1 flow |
-| `ConnectChaos-TrafficShiftHandler` (no VPC) | ✓ | ✓ | Requires `EnableAutoFailover=true` |
-| DynamoDB global tables ×3 | ✓ | ✓ | Created in primary, auto-replicated |
+| `ConnectChaos-TrafficShiftHandler` (no VPC) | ✓ | ✓ | Requires `EnableAutoTraffic transition=true` |
+| DynamoDB global tables ×3 | ✓ | ✓ | Created in source, auto-replicated |
 | S3 — FIS config bucket (`ccfis-…`) | ✓ | ✓ | Per Region |
 | FIS experiment templates ×3 | ✓ | ✓ | Per Region. Exp 4 is not a FIS experiment |
 | CloudWatch alarms ×4 + composite | ✓ | ✓ | Per Region |
@@ -595,7 +595,7 @@ It should not become the alarm — see [Experiment 3](#experiment-3--the-lex-cod
 
 **There is no SNS topic.** One used to be wired to the composite alarm, but nothing was ever
 subscribed to it, so it published into the void on every experiment while adding two security
-findings to justify. Failover never depended on it — that path is composite alarm → EventBridge →
+findings to justify. Traffic transition never depended on it — that path is composite alarm → EventBridge →
 `TrafficShiftHandler`.
 
 To get notified, create a topic, subscribe to it, then add `AlarmActions` and `OKActions` to
@@ -611,18 +611,18 @@ Set `EnableTrafficGenerator=true` to drive every alarm **without placing phone c
 `ConnectChaos-TrafficGenerator-{region}` plus a **disabled** EventBridge schedule.
 
 ```bash
-GEN=ConnectChaos-TrafficGenerator-$PRIMARY_REGION
+GEN=ConnectChaos-TrafficGenerator-$SOURCE_REGION
 
-aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
+aws lambda invoke --function-name $GEN --region $SOURCE_REGION \
   --payload '{"mode":"healthy","count":10}' /dev/stdout
 
 # faults: lambda | dynamodb | lex | flow | all
-aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
+aws lambda invoke --function-name $GEN --region $SOURCE_REGION \
   --payload '{"mode":"faulty","fault_type":"dynamodb","count":10}' /dev/stdout
 ```
 
 The generator emits metrics with the **same namespaces and dimensions** as real traffic, so
-CloudWatch cannot distinguish them and the full alarm → failover chain fires.
+CloudWatch cannot distinguish them and the full alarm → traffic transition chain fires.
 
 > **⚠️ Two limits.** Synthetic points are indistinguishable from real ones on your dashboard —
 > disable the schedule when finished. And `fault_type=lex` emits `RuntimeLambdaErrors` under
@@ -667,7 +667,7 @@ $10–15/month per Region, mostly dashboards and alarms.
   `scripts/scan-secrets.py`, which fails the build on account IDs, phone numbers, instance and
   TDG UUIDs, VPC and subnet IDs, access keys and private keys.
 - Experiment 4's chaos flag does **not** expire. `make reset` disarms it in both Regions and
-  `make verify` fails if the paired Region is still armed.
+  `make verify` fails if the replica Region is still armed.
 
 ### Accepted for this sample — and what each one assumes
 
@@ -681,7 +681,7 @@ are what make the reasoning valid, and **none of them hold in production**.
 |---|---|
 | FIS role holds `ec2:*NetworkAcl*` on `Resource: '*'` | The account contains nothing a mis-targeted experiment must not reach |
 | Security group has no explicit egress rule | There is no NAT and no internet gateway, so egress has no route. Add either and the control disappears |
-| No Dead Letter Queue on the failover path | An operator is watching each run, so a dropped event shows up immediately as "traffic did not shift" |
+| No Dead Letter Queue on the traffic transition path | An operator is watching each run, so a dropped event shows up immediately as "traffic did not shift" |
 | No DynamoDB point-in-time recovery | The data is demo fixtures, recreated by `make post-deploy` in seconds |
 | No reserved concurrency | Untested against real call volume; a cap would throttle and drop live calls |
 | No VPC flow logs, S3 access logging or versioning | Forensics and auditability are not required for a demo |
@@ -715,21 +715,21 @@ rollback plan, and agreement from whoever owns the customer-facing service.
 > stack will hit `DELETE_FAILED`.
 
 ```bash
-for R in $PAIRED_REGION $PRIMARY_REGION; do
+for R in $REPLICA_REGION $SOURCE_REGION; do
   aws s3 rm "s3://ccfis-${ACCT}-${R}-${STACK}/" --recursive --region $R
 done
 
-# delete PAIRED first, then PRIMARY
-aws cloudformation delete-stack --stack-name $STACK --region $PAIRED_REGION
-aws cloudformation wait stack-delete-complete --stack-name $STACK --region $PAIRED_REGION
-aws cloudformation delete-stack --stack-name $STACK --region $PRIMARY_REGION
+# delete REPLICA first, then SOURCE
+aws cloudformation delete-stack --stack-name $STACK --region $REPLICA_REGION
+aws cloudformation wait stack-delete-complete --stack-name $STACK --region $REPLICA_REGION
+aws cloudformation delete-stack --stack-name $STACK --region $SOURCE_REGION
 
 # optional: the code/staging bucket
-# aws s3 rb s3://connect-chaos-code-${ACCT}-${PRIMARY_REGION} --force --region $PRIMARY_REGION
+# aws s3 rb s3://connect-chaos-code-${ACCT}-${SOURCE_REGION} --force --region $SOURCE_REGION
 ```
 
-Paired before primary, because the DynamoDB global tables are owned by the primary stack. With
-Lex GR enabled, the replica bot is removed when the primary bot is deleted.
+Replica before source, because the DynamoDB global tables are owned by the source stack. With
+Lex GR enabled, the replica bot is removed when the source bot is deleted.
 
 ---
 
@@ -743,16 +743,16 @@ Lex GR enabled, the replica bot is removed when the primary bot is deleted.
 | Exp 2 invokes a call logger directly from the flow | Otherwise `ContactFlowErrors` never fired and Exp 2 only rode the Lambda-Errors alarm (Fix 6) |
 | Exp 3 uses Lambda `Duration`, not `ContactFlowErrors` or `RuntimeLambdaErrors` | Measured: the latency fault produces no flow-error datapoint, and that Lex metric is never emitted on Connect's voice path (Fixes 7, 18) |
 | Exp 4 uses a no-agent queue + `LongestQueueWaitTime` | `MissedCalls` needs a staffed agent to deliberately not answer — not reproducible by a reader |
-| Exp 4's chaos flag is Region-scoped | A Global Table would replicate the fault to the standby, making failover incapable of recovering (Fix 25) |
+| Exp 4's chaos flag is Region-scoped | A Global Table would replicate the fault to the standby, making traffic transition incapable of recovering (Fix 25) |
 | DTMF input, not speech | ASR mis-transcribed test account numbers in a way indistinguishable from a broken lookup |
 | Region announced at the start of every flow | Makes the serving Region audible instead of requiring two log groups to be cross-referenced (Fix 16) |
-| `$.AwsRegion` in the flows' Lambda and Lex ARNs | ACGR replicates flow content verbatim; a hardcoded Region makes the paired Region call the **primary's** dependencies, defeating failover (Fixes 8, 16) |
+| `$.AwsRegion` in the flows' Lambda and Lex ARNs | ACGR replicates flow content verbatim; a hardcoded Region makes the replica Region call the **source's** dependencies, defeating traffic transition (Fixes 8, 16) |
 | Explicit `IntegrationAssociation` per Region | A Lex bot must be associated with the instance before a flow can invoke it (Fix 5) |
 | `CreateVpc=true` with free gateway endpoints | Removes the VPC prerequisite at no cost. S3 reachability is mandatory — the FIS extension reads its config from S3 |
 | FIS layer ARN resolved from public SSM | Both the publishing account **and** the version differ per Region, so a hand-copied ARN fails silently (Fix 12) |
 | Lambda S3 key includes a code content hash | A fixed key made CloudFormation skip code updates and ship stale Lambdas while reporting success (Fix 21) |
 | Composite alarm has an explicit `DependsOn` | The rule names children in a `!Sub` literal, so CloudFormation cannot infer the dependency and creation races (Fix 1) |
-| A configurable dwell before the traffic shift | A 2-second failover is impossible to observe, and shifting a contact centre on a transient blip is not desirable (Fix 22) |
+| A configurable dwell before the traffic shift | A 2-second traffic transition is impossible to observe, and shifting a contact centre on a transient blip is not desirable (Fix 22) |
 | The handler re-checks the alarm after the dwell | A sleeping handler was silently undoing an operator's reset (Fix 23) |
 | Manual recovery | An operator should confirm the fault is resolved before customers are routed back |
 
@@ -767,7 +767,7 @@ Lex GR enabled, the replica bot is removed when the primary bot is deleted.
 | `contact-flows/*.json` | **Generated** reference copies — not deployed. Live flows are inline in the template |
 | `scripts/extract-flows.py` | Regenerates the reference JSON and validates flow structure |
 | `scripts/scan-secrets.py` | Fails the build on any committed credential or deployment-specific identifier |
-| `scripts/wire-paired-flow.sh` | Post-deploy, **only** when `EnableLexGlobalResiliency=false` |
+| `scripts/wire-replica-flow.sh` | Post-deploy, **only** when `EnableLexGlobalResiliency=false` |
 | `docs/` | Architecture diagram and its `awsdac` source |
 | `RUNBOOK.md` | The test procedure |
 
@@ -777,11 +777,11 @@ make bucket   REGION=...           # create the code/staging bucket (idempotent)
 make package                       # zip the Lambdas
 make bootstrap REGION=...          # bucket + package + upload
 make deploy      STACK=... REGION=... CONNECT_INSTANCE_ARN=... CONNECT_INSTANCE_ID=... TDG_ID=...
-make deploy-pair STACK=... PRIMARY_REGION=... PAIRED_REGION=... \
-                 PRIMARY_INSTANCE_ARN=... PAIRED_INSTANCE_ARN=... TDG_ID=...
-make post-deploy STACK=... PRIMARY_REGION=... PAIRED_REGION=... INSTANCE_ID=... TDG_ID=...
-make verify      STACK=... PRIMARY_REGION=... PAIRED_REGION=... TDG_ID=...
-make reset       STACK=... PRIMARY_REGION=... PAIRED_REGION=... TDG_ID=...   # see RUNBOOK Step R
+make deploy-pair STACK=... SOURCE_REGION=... REPLICA_REGION=... \
+                 SOURCE_INSTANCE_ARN=... REPLICA_INSTANCE_ARN=... TDG_ID=...
+make post-deploy STACK=... SOURCE_REGION=... REPLICA_REGION=... INSTANCE_ID=... TDG_ID=...
+make verify      STACK=... SOURCE_REGION=... REPLICA_REGION=... TDG_ID=...
+make reset       STACK=... SOURCE_REGION=... REPLICA_REGION=... TDG_ID=...   # see RUNBOOK Step R
 make flows                         # regenerate contact-flows/*.json from the template
 make lint                          # cfn-lint, bash -n, py_compile, JSON, flow drift, secrets
 make clean
@@ -808,7 +808,7 @@ python3 scripts/scan-secrets.py --staged
 ```
 
 Run `make lint` before committing. There is no CI in this repo; validation is local. `-i W1030`
-is expected — the `ReplicatedLexBot*` parameters are intentionally empty in primary-Region
+is expected — the `ReplicatedLexBot*` parameters are intentionally empty in source-Region
 deploys.
 
 **The template exceeds CloudFormation's 51,200-byte inline limit** (~84 KB), so deploys must

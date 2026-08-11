@@ -38,8 +38,8 @@ arn:aws:lex:$.AwsRegion:ACCOUNT_ID:bot-alias/BOT_ID/BOT_ALIAS_ID
 arn:aws:lambda:$.AwsRegion:ACCOUNT_ID:function:FUNCTION_NAME
 ```
 
-ACGR replicates flow content **verbatim**, so a hardcoded Region makes the paired Region invoke
-the *primary's* dependencies — after failover your "healthy" Region still depends on the one you
+ACGR replicates flow content **verbatim**, so a hardcoded Region makes the replica Region invoke
+the *source's* dependencies — after traffic transition your "healthy" Region still depends on the one you
 just declared unhealthy. The failure is invisible unless you deploy both Regions and check which
 Region's Lambda logged the call. It is preserved verbatim by the generator because it is a Connect
 **runtime** token, not a CloudFormation reference.
@@ -49,7 +49,7 @@ Region's Lambda logged the call. It is preserved verbatim by the generator becau
 Connect-internal ARNs such as queues are remapped by ACGR itself and need no token.
 
 > When `EnableLexGlobalResiliency=false` (`ap-northeast-1`↔`ap-northeast-3`) the per-Region bot
-> IDs differ, so `$.AwsRegion` alone is not enough — run `scripts/wire-paired-flow.sh` after
+> IDs differ, so `$.AwsRegion` alone is not enough — run `scripts/wire-replica-flow.sh` after
 > deploying.
 
 **2. The Lex block needs a prompt.** `ConnectParticipantWithLexBot` must carry `Text` (or

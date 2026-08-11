@@ -67,3 +67,11 @@ SecurityFindings/
 # maintainer knowledge rather than sample content, so it is kept local and not published.
 # The code and template carry self-contained explanations for the decisions it covers.
 FIXES.md
+# Blog drafts are authored alongside the sample but are not sample content.
+blog-*.md
+# Working diagram sources and exports. The repository's own diagram is docs/architecture.png,
+# generated from docs/architecture.dac.yaml. Blog figures live with the blog drafts.
+docs/*.drawio
+docs/*.drawio.png
+docs/rendered_arch.png
+docs/final2.drawio.png

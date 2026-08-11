@@ -5,11 +5,11 @@
 # gateway endpoints to DynamoDB and S3 (the FIS Lambda extension reads its
 # fault config from S3). No NAT gateway, no internet gateway.
 #
-# Reflects the shipping template: ACGR-paired primary/paired regions, Lex
+# Reflects the shipping template: ACGR-paired source/replica Regions, Lex
 # Global Resiliency as the default cross-region bot replication, a per-region
 # FIS config bucket feeding the FIS Lambda extension, four chaos experiments
 # each mapped to a distinct alarm, a composite alarm, and the EventBridge ->
-# TrafficShiftHandler -> UpdateTrafficDistribution failover path.
+# TrafficShiftHandler -> UpdateTrafficDistribution traffic transition path.
 
 Diagram:
   DefinitionFiles:
@@ -31,7 +31,7 @@ Diagram:
       Type: AWS::Diagram::Cloud
       Preset: AWSCloudNoLogo
       Direction: vertical
-      Children: [TDG, RegionsRow, Failover]
+      Children: [TDG, RegionsRow, TrafficTransition]
 
     TDG:
       Type: AWS::Connect
@@ -44,7 +44,7 @@ Diagram:
     PrimaryRegion:
       Type: AWS::Diagram::Resource
       Preset: Generic group
-      Title: "Primary Region"
+      Title: "Source Region"
       Direction: vertical
       Children: [PrimaryConnect, PrimaryLex, PrimaryLambda, PrimaryFISBucket, PrimaryFIS, PrimaryDDB, PrimaryAlarms, PrimaryComposite]
 
@@ -76,7 +76,7 @@ Diagram:
     PairedRegion:
       Type: AWS::Diagram::Resource
       Preset: Generic group
-      Title: "Paired Region"
+      Title: "Replica Region"
       Direction: vertical
       Children: [PairedConnect, PairedLex, PairedLambda, PairedFISBucket, PairedFIS, PairedDDB, PairedAlarms, PairedComposite]
 
@@ -105,13 +105,13 @@ Diagram:
       Type: AWS::CloudWatch::Alarm
       Title: "Composite alarm"
 
-    Failover:
+    TrafficTransition:
       Type: AWS::Diagram::HorizontalStack
       Children: [EventRule, TrafficShift]
 
     EventRule:
       Type: AWS::Events::Rule
-      Title: "EventBridge failover rule"
+      Title: "EventBridge traffic transition rule"
     TrafficShift:
       Type: AWS::Lambda::Function
       Title: "TrafficShiftHandler"
@@ -136,7 +136,7 @@ Diagram:
       TargetPosition: N
       TargetArrowHead: { Type: Open }
       Type: orthogonal
-      Labels: { TargetRight: { Title: 100% on failover } }
+      Labels: { TargetRight: { Title: 100% on traffic transition } }
     - Source: PrimaryConnect
       SourcePosition: S
       Target: PrimaryLex

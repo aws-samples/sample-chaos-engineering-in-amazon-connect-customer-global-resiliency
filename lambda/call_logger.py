@@ -16,7 +16,7 @@ number, the dialed number, channel, and a timestamp is a typical "first block in
 the flow" pattern.
 
 The table (<StackName>-CallLog, from CALL_LOG_TABLE_NAME) is a DynamoDB Global Table, so call records written
-in the primary region are replicated to the paired region — after ACGR fails
+in the source Region are replicated to the replica Region — after ACGR fails
 telephony over, the receiving region still has (and keeps appending to) the same
 call log.
 

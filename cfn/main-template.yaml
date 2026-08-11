@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: |
-  Amazon Connect FIS Chaos Engineering - ACGR Failover (StackSet-Ready).
-  Deploy via StackSet to both primary and paired regions.
-  Uses IsPrimaryRegion condition to control region-specific resources.
+  Amazon Connect FIS Chaos Engineering - ACGR Traffic transition (StackSet-Ready).
+  Deploy via StackSet to both source and replica Regions.
+  Uses IsSourceRegion condition to control region-specific resources.
 
   NON-PRODUCTION SAMPLE - DEPLOY INTO A DEDICATED AWS ACCOUNT.
   The FIS execution role can create, modify, delete and re-associate network ACLs on ANY
@@ -27,30 +27,30 @@ Parameters:
     Type: String
     Description: Connect Instance ID (UUID) for THIS region
 
-  PrimaryRegion:
+  SourceRegion:
     Type: String
-    Description: Primary ACGR region
+    Description: Source ACGR region
     Default: us-east-1
     AllowedValues: [us-east-1, us-west-2, ap-northeast-1, ap-northeast-3, eu-central-1, eu-west-2]
 
-  PairedRegion:
+  ReplicaRegion:
     Type: String
-    Description: Paired ACGR region
+    Description: Replica ACGR region
     Default: us-west-2
     AllowedValues: [us-east-1, us-west-2, ap-northeast-1, ap-northeast-3, eu-central-1, eu-west-2]
   TrafficDistributionGroupId:
     Type: String
-    Description: Traffic Distribution Group ID for ACGR failover
+    Description: Traffic Distribution Group ID for ACGR traffic transition
 
-  EnableAutoFailover:
+  EnableAutoRegionSwitch:
     Type: String
-    Description: Deploy EventBridge + TrafficShift Lambda for automatic failover
+    Description: Deploy EventBridge + TrafficShift Lambda for automatic region switch
     AllowedValues: ['true', 'false']
     Default: 'false'
 
   DashboardType:
     Type: String
-    Description: 'regional = per-region dashboard; unified = single cross-region dashboard in primary'
+    Description: 'regional = per-region dashboard; unified = single cross-region dashboard in source'
     AllowedValues: ['regional', 'unified']
     Default: regional
 
@@ -132,15 +132,15 @@ Parameters:
       the object in S3 was replaced - shipping code and configuration that disagree. That
       failure is silent: the stack reports UPDATE_COMPLETE.
 
-  FailoverDelaySeconds:
+  RegionSwitchDelaySeconds:
     Type: Number
     Default: 120
     MinValue: 0
     MaxValue: 600
     Description: >-
       How long TrafficShiftHandler waits AFTER the composite alarm fires before moving
-      telephony to the paired Region. The point is demonstrative: it lets callers experience
-      the impaired Region rather than having it repaired out from under them. Detection
+      telephony to the replica Region. The point is demonstrative: it lets callers experience
+      the imreplica Region rather than having it repaired out from under them. Detection
       already costs ~90s of Connect metric latency, so the total broken window is roughly
       that plus this value. Set 0 for fastest recovery. Capped at 600 because the handler's
       timeout must exceed it.
@@ -153,7 +153,7 @@ Parameters:
       GreaterThanThreshold. Default 0 means a SINGLE flow error trips the alarm, which is
       what makes the experiment demonstrable with one test call. A higher value is correct
       for production monitoring but makes single-call testing impossible: one call produces
-      exactly one error, so a threshold of 5 can never be exceeded and no failover occurs
+      exactly one error, so a threshold of 5 can never be exceeded and no traffic transition occurs
       even though the fault is working correctly.
 
   LexCodeHookLatencyThresholdMs:
@@ -189,37 +189,37 @@ Parameters:
   EnableLexGlobalResiliency:
     Type: String
     Description: >-
-      Use Amazon Lex Global Resiliency to replicate the Lex V2 bot from primary to paired.
+      Use Amazon Lex Global Resiliency to replicate the Lex V2 bot from source to replica.
       Strongly recommended (default 'true') because Lex GR preserves bot ID and alias ARN
       across regions — so the contact flow's hardcoded Lex alias ARN remains valid after
-      ACGR replicates the flow to the paired region. Set to 'false' only if Lex GR is not
+      ACGR replicates the flow to the replica Region. Set to 'false' only if Lex GR is not
       available for your account; you must then run the post-deploy script in
-      scripts/wire-paired-flow.sh to rewrite the paired-region flow content.
+      scripts/wire-replica-flow.sh to rewrite the replica-region flow content.
     AllowedValues: ['true', 'false']
     Default: 'true'
 
   ReplicatedLexBotId:
     Type: String
     Description: >-
-      (Paired region only, when EnableLexGlobalResiliency=true.) The Lex bot ID emitted
-      by the primary-region stack output `LexBotId`. Lex GR preserves the same ID in the
-      paired region. Pass empty string ("") in primary region.
+      (Replica Region only, when EnableLexGlobalResiliency=true.) The Lex bot ID emitted
+      by the source-region stack output `LexBotId`. Lex GR preserves the same ID in the
+      replica Region. Pass empty string ("") in source Region.
     Default: ''
 
   ReplicatedLexBotAliasId:
     Type: String
     Description: >-
-      (Paired region only, when EnableLexGlobalResiliency=true.) The Lex bot alias ID
-      emitted by the primary-region stack output `LexBotAliasId`.
-      Pass empty string ("") in primary region.
+      (Replica Region only, when EnableLexGlobalResiliency=true.) The Lex bot alias ID
+      emitted by the source-region stack output `LexBotAliasId`.
+      Pass empty string ("") in source Region.
     Default: ''
 
-  PairedConnectInstanceId:
+  ReplicaConnectInstanceId:
     Type: String
     Description: >-
-      (Primary region only, when DashboardType=unified.) The paired-region Connect
-      instance ID. Used to render the paired-region panels of the unified dashboard.
-      Pass empty string ("") in paired region or when DashboardType=regional.
+      (Source Region only, when DashboardType=unified.) The replica-region Connect
+      instance ID. Used to render the replica-region panels of the unified dashboard.
+      Pass empty string ("") in replica Region or when DashboardType=regional.
     Default: ''
 
 
@@ -250,72 +250,72 @@ Rules:
     Assertions:
       - Assert: !Or
           - !And
-            - !Equals [!Ref PrimaryRegion, us-east-1]
-            - !Equals [!Ref PairedRegion, us-west-2]
+            - !Equals [!Ref SourceRegion, us-east-1]
+            - !Equals [!Ref ReplicaRegion, us-west-2]
           - !And
-            - !Equals [!Ref PrimaryRegion, us-west-2]
-            - !Equals [!Ref PairedRegion, us-east-1]
+            - !Equals [!Ref SourceRegion, us-west-2]
+            - !Equals [!Ref ReplicaRegion, us-east-1]
           - !And
-            - !Equals [!Ref PrimaryRegion, eu-west-2]
-            - !Equals [!Ref PairedRegion, eu-central-1]
+            - !Equals [!Ref SourceRegion, eu-west-2]
+            - !Equals [!Ref ReplicaRegion, eu-central-1]
           - !And
-            - !Equals [!Ref PrimaryRegion, eu-central-1]
-            - !Equals [!Ref PairedRegion, eu-west-2]
+            - !Equals [!Ref SourceRegion, eu-central-1]
+            - !Equals [!Ref ReplicaRegion, eu-west-2]
           - !And
-            - !Equals [!Ref PrimaryRegion, ap-northeast-1]
-            - !Equals [!Ref PairedRegion, ap-northeast-3]
+            - !Equals [!Ref SourceRegion, ap-northeast-1]
+            - !Equals [!Ref ReplicaRegion, ap-northeast-3]
         AssertDescription: >-
-          PrimaryRegion + PairedRegion must form an ACGR-supported pair:
+          SourceRegion + ReplicaRegion must form an ACGR-supported pair:
           us-east-1/us-west-2, eu-west-2/eu-central-1, or ap-northeast-1/ap-northeast-3.
 
   # Lex Global Resiliency currently supports IAD/PDX and LDN/FRA only.
   # Tokyo/Osaka customers must run with EnableLexGlobalResiliency=false (per-region Lex deploy)
-  # and use the post-deploy script to wire the paired-region contact flow.
+  # and use the post-deploy script to wire the replica-region contact flow.
   LexGRPairAvailable:
     RuleCondition: !Equals [!Ref EnableLexGlobalResiliency, 'true']
     Assertions:
       - Assert: !Or
           - !And
-            - !Equals [!Ref PrimaryRegion, us-east-1]
-            - !Equals [!Ref PairedRegion, us-west-2]
+            - !Equals [!Ref SourceRegion, us-east-1]
+            - !Equals [!Ref ReplicaRegion, us-west-2]
           - !And
-            - !Equals [!Ref PrimaryRegion, us-west-2]
-            - !Equals [!Ref PairedRegion, us-east-1]
+            - !Equals [!Ref SourceRegion, us-west-2]
+            - !Equals [!Ref ReplicaRegion, us-east-1]
           - !And
-            - !Equals [!Ref PrimaryRegion, eu-west-2]
-            - !Equals [!Ref PairedRegion, eu-central-1]
+            - !Equals [!Ref SourceRegion, eu-west-2]
+            - !Equals [!Ref ReplicaRegion, eu-central-1]
           - !And
-            - !Equals [!Ref PrimaryRegion, eu-central-1]
-            - !Equals [!Ref PairedRegion, eu-west-2]
+            - !Equals [!Ref SourceRegion, eu-central-1]
+            - !Equals [!Ref ReplicaRegion, eu-west-2]
         AssertDescription: >-
           Lex Global Resiliency currently supports only us-east-1/us-west-2 and
           eu-west-2/eu-central-1 region pairs. For ap-northeast-1/ap-northeast-3,
-          set EnableLexGlobalResiliency=false and run scripts/wire-paired-flow.sh
-          after deploy to wire the paired-region contact flow to its independent Lex bot.
+          set EnableLexGlobalResiliency=false and run scripts/wire-replica-flow.sh
+          after deploy to wire the replica-region contact flow to its independent Lex bot.
 
 # ═══════════════════════════════════════════════════════════════
 # CONDITIONS
 # ═══════════════════════════════════════════════════════════════
 Conditions:
-  IsPrimaryRegion: !Equals [!Ref 'AWS::Region', !Ref PrimaryRegion]
-  DeployAutoFailover: !Equals [!Ref EnableAutoFailover, 'true']
+  IsSourceRegion: !Equals [!Ref 'AWS::Region', !Ref SourceRegion]
+  DeployAutoRegionSwitch: !Equals [!Ref EnableAutoRegionSwitch, 'true']
   DeployRegionalDashboard: !Equals [!Ref DashboardType, 'regional']
   DeployUnifiedDashboard: !And
     - !Equals [!Ref DashboardType, 'unified']
-    - !Condition IsPrimaryRegion
+    - !Condition IsSourceRegion
   DeployTrafficGenerator: !Equals [!Ref EnableTrafficGenerator, 'true']
   UseLexGR: !Equals [!Ref EnableLexGlobalResiliency, 'true']
   MakeVpc: !Equals [!Ref CreateVpc, 'true']
 
-  # Source-side Lex GR replication is declared on the bot in the primary region only.
-  UseLexGRPrimary: !And
+  # Source-side Lex GR replication is declared on the bot in the source Region only.
+  UseLexGRSource: !And
     - !Condition UseLexGR
-    - !Condition IsPrimaryRegion
+    - !Condition IsSourceRegion
 
-  # When Lex GR is on, the Lex bot is created ONLY in the primary region; Lex GR replicates
-  # it to the paired region. When Lex GR is off, the bot is created independently per region.
+  # When Lex GR is on, the Lex bot is created ONLY in the source Region; Lex GR replicates
+  # it to the replica Region. When Lex GR is off, the bot is created independently per region.
   CreateLexLocally: !Or
-    - !Condition IsPrimaryRegion
+    - !Condition IsSourceRegion
     - !Not [!Condition UseLexGR]
 
 # ═══════════════════════════════════════════════════════════════
@@ -324,7 +324,7 @@ Conditions:
 Resources:
 
   # ═══════════════════════════════════════════════════════════
-  # PRIMARY REGION ONLY
+  # SOURCE REGION ONLY
   # ═══════════════════════════════════════════════════════════
 
   # ── DynamoDB global tables ──
@@ -348,7 +348,7 @@ Resources:
               fixtures recreated by 'make post-deploy' in seconds, with no production or
               customer data. PITR would protect nothing that is not trivially regenerated. Any
               real deployment must enable it.
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     Properties:
       TableName: !Sub '${AWS::StackName}-Customers'
       BillingMode: PAY_PER_REQUEST
@@ -359,19 +359,19 @@ Resources:
         - AttributeName: account_id
           KeyType: HASH
       Replicas:
-        - Region: !Ref PrimaryRegion
+        - Region: !Ref SourceRegion
           Tags:
             - Key: FISExperiment
               Value: ConnectChaos
-        - Region: !Ref PairedRegion
+        - Region: !Ref ReplicaRegion
           Tags:
             - Key: FISExperiment
               Value: ConnectChaos
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
 
-  # Inbound-call log. A DynamoDB Global Table so call records written in the primary
-  # region replicate to the paired region — after ACGR fails telephony over, the
+  # Inbound-call log. A DynamoDB Global Table so call records written in the source
+  # region replicate to the replica Region — after ACGR fails telephony over, the
   # receiving region has (and keeps appending to) the same log. The CallLogger Lambda
   # writes one item per inbound contact from the very first block of the flow.
   CallLogTable:
@@ -386,7 +386,7 @@ Resources:
               fixtures recreated by 'make post-deploy' in seconds, with no production or
               customer data. PITR would protect nothing that is not trivially regenerated. Any
               real deployment must enable it.
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     Properties:
       TableName: !Sub '${AWS::StackName}-CallLog'
       BillingMode: PAY_PER_REQUEST
@@ -400,11 +400,11 @@ Resources:
         AttributeName: expires_at
         Enabled: true
       Replicas:
-        - Region: !Ref PrimaryRegion
+        - Region: !Ref SourceRegion
           Tags:
             - Key: FISExperiment
               Value: ConnectChaos
-        - Region: !Ref PairedRegion
+        - Region: !Ref ReplicaRegion
           Tags:
             - Key: FISExperiment
               Value: ConnectChaos
@@ -423,7 +423,7 @@ Resources:
               fixtures recreated by 'make post-deploy' in seconds, with no production or
               customer data. PITR would protect nothing that is not trivially regenerated. Any
               real deployment must enable it.
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     Properties:
       TableName: !Sub '${AWS::StackName}-Config'
       BillingMode: PAY_PER_REQUEST
@@ -434,11 +434,11 @@ Resources:
         - AttributeName: config_key
           KeyType: HASH
       Replicas:
-        - Region: !Ref PrimaryRegion
+        - Region: !Ref SourceRegion
           Tags:
             - Key: FISExperiment
               Value: ConnectChaos
-        - Region: !Ref PairedRegion
+        - Region: !Ref ReplicaRegion
           Tags:
             - Key: FISExperiment
               Value: ConnectChaos
@@ -447,11 +447,11 @@ Resources:
 
   # FIX: A Lex V2 bot must be associated with the Connect instance (IntegrationAssociation)
   # before the contact flows can invoke it at call time. Without this, the flows deploy but
-  # Lex is never reachable from Connect at runtime. Primary region only (that is where the
-  # flows are created and the bot is created locally; ACGR/Lex GR handle the paired region).
+  # Lex is never reachable from Connect at runtime. Source Region only (that is where the
+  # flows are created and the bot is created locally; ACGR/Lex GR handle the replica Region).
   LexBotAssociation:
     Type: AWS::Connect::IntegrationAssociation
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     Properties:
       InstanceId: !Ref ConnectInstanceArn
       IntegrationType: LEX_BOT
@@ -459,7 +459,7 @@ Resources:
 
   MenuFlow:
     Type: AWS::Connect::ContactFlow
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     DependsOn:
       - LexBotAssociation
       - CallLoggerAssociation
@@ -473,7 +473,7 @@ Resources:
         {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Welcome to the chaos engineering sample."},"Transitions":{"NextAction":"menu","Errors":[{"NextAction":"menu","ErrorType":"NoMatchingError"}]}},{"Identifier":"menu","Type":"GetParticipantInput","Parameters":{"Text":"Press 1 for the account lookup experiment. Press 2 for the call audit experiment. Press 3 for the speech latency experiment. Press 4 for the queue overflow experiment.","InputTimeLimitSeconds":"10","StoreInput":"False"},"Transitions":{"NextAction":"invalid","Conditions":[{"NextAction":"to-exp1","Condition":{"Operator":"Equals","Operands":["1"]}},{"NextAction":"to-exp2","Condition":{"Operator":"Equals","Operands":["2"]}},{"NextAction":"to-exp3","Condition":{"Operator":"Equals","Operands":["3"]}},{"NextAction":"to-exp4","Condition":{"Operator":"Equals","Operands":["4"]}}],"Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingCondition"},{"NextAction":"invalid","ErrorType":"InputTimeLimitExceeded"},{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"to-exp1","Type":"TransferToFlow","Parameters":{"ContactFlowId":"${Exp1Flow}"},"Transitions":{"NextAction":"invalid","Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"to-exp2","Type":"TransferToFlow","Parameters":{"ContactFlowId":"${Exp2Flow}"},"Transitions":{"NextAction":"invalid","Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"to-exp3","Type":"TransferToFlow","Parameters":{"ContactFlowId":"${Exp3Flow}"},"Transitions":{"NextAction":"invalid","Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"to-exp4","Type":"TransferToFlow","Parameters":{"ContactFlowId":"${Exp4Flow}"},"Transitions":{"NextAction":"invalid","Errors":[{"NextAction":"invalid","ErrorType":"NoMatchingError"}]}},{"Identifier":"invalid","Type":"MessageParticipant","Parameters":{"Text":"No valid selection was received. Goodbye."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
   Exp1Flow:
     Type: AWS::Connect::ContactFlow
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     DependsOn:
       - LexBotAssociation
       - CallLoggerAssociation
@@ -487,7 +487,7 @@ Resources:
         {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Experiment one, account lookup."},"Transitions":{"NextAction":"ask","Errors":[{"NextAction":"ask","ErrorType":"NoMatchingError"}]}},{"Identifier":"ask","Type":"GetParticipantInput","Parameters":{"Text":"Please enter your five digit account number, followed by the pound key.","InputTimeLimitSeconds":"10","StoreInput":"True","InputValidation":{"CustomValidation":{"MaximumLength":"5"}},"DTMFConfiguration":{"InterdigitTimeLimitSeconds":"5"}},"Transitions":{"NextAction":"lookup","Errors":[{"NextAction":"lookup-down","ErrorType":"NoMatchingError"}]}},{"Identifier":"lookup","Type":"InvokeLambdaFunction","Parameters":{"LambdaFunctionARN":"arn:aws:lambda:$.AwsRegion:${AWS::AccountId}:function:${AccountLookupHandler}","InvocationTimeLimitSeconds":"8","LambdaInvocationAttributes":{"AccountId":"$.StoredCustomerInput"},"ResponseValidation":{"ResponseType":"STRING_MAP"}},"Transitions":{"NextAction":"check","Errors":[{"NextAction":"lookup-down","ErrorType":"NoMatchingError"}]}},{"Identifier":"check","Type":"Compare","Parameters":{"ComparisonValue":"$.External.status"},"Transitions":{"NextAction":"not-found","Conditions":[{"NextAction":"found","Condition":{"Operator":"Equals","Operands":["FOUND"]}},{"NextAction":"not-found","Condition":{"Operator":"Equals","Operands":["NOT_FOUND"]}},{"NextAction":"no-input","Condition":{"Operator":"Equals","Operands":["INVALID_INPUT"]}}],"Errors":[{"NextAction":"not-found","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"found","Type":"MessageParticipant","Parameters":{"Text":"Welcome back, $.External.customer_name. Your account is in good standing."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"not-found","Type":"MessageParticipant","Parameters":{"Text":"That account number was not found. Please check it and call again."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"no-input","Type":"MessageParticipant","Parameters":{"Text":"No account number was received."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"lookup-down","Type":"MessageParticipant","Parameters":{"Text":"The account lookup service is unavailable. This is experiment one."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
   Exp2Flow:
     Type: AWS::Connect::ContactFlow
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     DependsOn:
       - LexBotAssociation
       - CallLoggerAssociation
@@ -501,7 +501,7 @@ Resources:
         {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Experiment two, call audit logging."},"Transitions":{"NextAction":"log-call","Errors":[{"NextAction":"log-call","ErrorType":"NoMatchingError"}]}},{"Identifier":"log-call","Type":"InvokeLambdaFunction","Parameters":{"LambdaFunctionARN":"arn:aws:lambda:$.AwsRegion:${AWS::AccountId}:function:${CallLoggerHandler}","InvocationTimeLimitSeconds":"8"},"Transitions":{"NextAction":"logged","Errors":[{"NextAction":"log-down","ErrorType":"NoMatchingError"}]}},{"Identifier":"logged","Type":"MessageParticipant","Parameters":{"Text":"Your call has been recorded for quality purposes. Thank you."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"log-down","Type":"MessageParticipant","Parameters":{"Text":"We could not record your call. This is experiment two."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
   Exp3Flow:
     Type: AWS::Connect::ContactFlow
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     DependsOn:
       - LexBotAssociation
       - CallLoggerAssociation
@@ -515,7 +515,7 @@ Resources:
         {"Version":"2019-10-30","StartAction":"entry","Actions":[{"Identifier":"entry","Type":"MessageParticipant","Parameters":{"Text":"Connected in region $.AwsRegion. Experiment three, speech latency."},"Transitions":{"NextAction":"lex-input","Errors":[{"NextAction":"lex-input","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-input","Type":"ConnectParticipantWithLexBot","Parameters":{"Text":"How can I help you today? You can ask to look up your account or check an order.","LexV2Bot":{"AliasArn":"arn:aws:lex:$.AwsRegion:${AWS::AccountId}:bot-alias/${ConnectChaosBot.Id}/${ConnectChaosBotAlias.BotAliasId}"}},"Transitions":{"NextAction":"ok","Conditions":[{"NextAction":"ok","Condition":{"Operator":"Equals","Operands":["LookupCustomer"]}},{"NextAction":"ok","Condition":{"Operator":"Equals","Operands":["CheckOrderStatus"]}}],"Errors":[{"NextAction":"lex-slow","ErrorType":"NoMatchingError"},{"NextAction":"lex-slow","ErrorType":"NoMatchingCondition"}]}},{"Identifier":"ok","Type":"MessageParticipant","Parameters":{"Text":"I found your information. Transferring to an agent."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"lex-slow","Type":"MessageParticipant","Parameters":{"Text":"The lookup service is taking too long. This is experiment three."},"Transitions":{"NextAction":"disconnect","Errors":[{"NextAction":"disconnect","ErrorType":"NoMatchingError"}]}},{"Identifier":"disconnect","Type":"DisconnectParticipant","Parameters":{},"Transitions":{}}]}
   Exp4Flow:
     Type: AWS::Connect::ContactFlow
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     DependsOn:
       - LexBotAssociation
       - CallLoggerAssociation
@@ -655,11 +655,11 @@ Resources:
   # Hours of operation (24x7) is required by AWS::Connect::Queue. This queue is referenced
   # by NO routing profile, so no agent can ever receive its contacts - a contact
   # transferred here waits indefinitely, driving LongestQueueWaitTime up deterministically.
-  # ACGR replicates both resources to the paired region and remaps flow queue references,
+  # ACGR replicates both resources to the replica Region and remaps flow queue references,
   # so no $.AwsRegion handling is needed for these Connect-internal ARNs.
   ChaosHoursOfOperation:
     Type: AWS::Connect::HoursOfOperation
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     Properties:
       InstanceArn: !Ref ConnectInstanceArn
       Name: ConnectChaos-24x7
@@ -690,7 +690,7 @@ Resources:
 
   ChaosOverflowQueue:
     Type: AWS::Connect::Queue
-    Condition: IsPrimaryRegion
+    Condition: IsSourceRegion
     Properties:
       InstanceArn: !Ref ConnectInstanceArn
       Name: ConnectChaos-Overflow
@@ -707,7 +707,7 @@ Resources:
   # FIX: short 'ccfis-' prefix. S3 bucket names cap at 63 chars; the old
   # 'connect-chaos-fis-' prefix + account(12) + region + stackname overflowed 63
   # in longer-named regions (e.g. eu-central-1 = 64 chars, ap-northeast-3), which
-  # failed the paired-region deploy with "Bucket name should be between 3 and 63
+  # failed the replica-region deploy with "Bucket name should be between 3 and 63
   # characters long".
   FISConfigBucket:
     Type: AWS::S3::Bucket
@@ -759,7 +759,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
           - id: W11
             reason: >-
@@ -792,7 +792,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
     Properties:
       RoleName: !Sub 'ConnectChaos-LexFulfillment-${AWS::Region}'
@@ -842,7 +842,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
     Properties:
       RoleName: !Sub 'ConnectChaos-CallLogger-${AWS::Region}'
@@ -877,7 +877,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
     Properties:
       RoleName: !Sub 'ConnectChaos-AccountLookup-${AWS::Region}'
@@ -929,7 +929,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
           - id: W11
             reason: >-
@@ -1008,13 +1008,13 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
           - id: W11
             reason: >-
               Scoped as far as the APIs allow. The FIS network policy is the one worth reducing; a scoped three-statement replacement is
               planned, keyed on the managedbyFIS=true tag FIS applies to the ACL it clones.
-    Condition: DeployAutoFailover
+    Condition: DeployAutoRegionSwitch
     Properties:
       RoleName: !Sub 'ConnectChaos-TrafficShift-${AWS::Region}'
       AssumeRolePolicyDocument:
@@ -1036,25 +1036,25 @@ Resources:
                   - connect:UpdateTrafficDistribution
                   - connect:GetTrafficDistribution
                   - connect:DescribeTrafficDistributionGroup
-                # Scoped to the TDG's OWN region (PrimaryRegion), not the deploying region.
-                # ${AWS::Region} here meant the paired region's role was scoped to a
+                # Scoped to the TDG's OWN region (SourceRegion), not the deploying region.
+                # ${AWS::Region} here meant the replica Region's role was scoped to a
                 # us-west-2 TDG ARN that does not exist, so it was denied even with the
                 # correct identifier.
                 Resource: !Sub
-                  'arn:aws:connect:${PrimaryRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
+                  'arn:aws:connect:${SourceRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
         - PolicyName: ReadAlarmState
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Needed to re-check the alarm after the failover dwell.
+              # Needed to re-check the alarm after the traffic transition dwell.
               # DescribeAlarms does not support resource-level permissions.
               - Effect: Allow
                 Action: cloudwatch:DescribeAlarms
                 Resource: '*'
 
   # ── Lex V2 Bot ──
-  # When EnableLexGlobalResiliency=true (default): bot is created in PRIMARY only and
-  # replicated to PAIRED via Lex GR — preserving bot ID and alias ARN cross-region so
+  # When EnableLexGlobalResiliency=true (default): bot is created in SOURCE only and
+  # replicated to REPLICA via Lex GR — preserving bot ID and alias ARN cross-region so
   # the contact flow's hardcoded Lex alias ARN remains valid after ACGR replicates the
   # contact flow content.
   # When false: bot is created independently per region.
@@ -1072,17 +1072,17 @@ Resources:
         ChildDirected: false
       IdleSessionTTLInSeconds: 300
       AutoBuildBotLocales: true
-      # Lex Global Resiliency replication block — declared on the source (primary) bot.
-      # When EnableLexGlobalResiliency=true and we're in the primary region, this triggers
+      # Lex Global Resiliency replication block — declared on the source (source) bot.
+      # When EnableLexGlobalResiliency=true and we're in the source Region, this triggers
       # Lex to replicate the bot, all versions, and all aliases to ReplicaRegion. Replicas
       # preserve the same bot ID and alias ARN, so downstream Connect contact flows can
       # reference a single ARN that resolves correctly in either region after ACGR replicates
       # the contact flow content.
       # Ref: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-lex-bot-replication.html
       Replication: !If
-        - UseLexGRPrimary
+        - UseLexGRSource
         - ReplicaRegions:
-            - !Ref PairedRegion
+            - !Ref ReplicaRegion
         - !Ref AWS::NoValue
       BotLocales:
         - LocaleId: en_US
@@ -1194,7 +1194,7 @@ Resources:
               synchronously by a contact flow, where the caller experiences the failure directly
               and a queued retry has no value. The asynchronous path that does matter is
               EventBridge -> TrafficShiftHandler: without a DLQ a repeatedly failing invoke
-              would eventually drop the failover event with nothing recording it. That is
+              would eventually drop the traffic transition event with nothing recording it. That is
               tolerable here only because every experiment is operator-initiated and verified
               against the runbook, so a lost event is recovered by re-running it. In production
               nobody is watching, so add a DLQ on the EventBridge rule target plus an alarm on
@@ -1275,9 +1275,9 @@ Resources:
   # that errors DOES route the contact down the flow's Error branch, which is exactly
   # what ContactFlowErrors counts. This function runs in the SAME VPC subnets FIS
   # Exp 2 disrupts, so the network fault applies to its put_item. Deployed in BOTH
-  # regions (unlike the primary-only Lex bot, there is no Lex-GR equivalent for
+  # regions (unlike the source-only Lex bot, there is no Lex-GR equivalent for
   # Lambda), and associated with each region's Connect instance so ACGR can remap the
-  # ARN in the replicated paired-region flow.
+  # ARN in the replicated replica-region flow.
   CallLoggerHandler:
     Type: AWS::Lambda::Function
     Metadata:
@@ -1305,7 +1305,7 @@ Resources:
               synchronously by a contact flow, where the caller experiences the failure directly
               and a queued retry has no value. The asynchronous path that does matter is
               EventBridge -> TrafficShiftHandler: without a DLQ a repeatedly failing invoke
-              would eventually drop the failover event with nothing recording it. That is
+              would eventually drop the traffic transition event with nothing recording it. That is
               tolerable here only because every experiment is operator-initiated and verified
               against the runbook, so a lost event is recovered by re-running it. In production
               nobody is watching, so add a DLQ on the EventBridge rule target plus an alarm on
@@ -1373,7 +1373,7 @@ Resources:
               synchronously by a contact flow, where the caller experiences the failure directly
               and a queued retry has no value. The asynchronous path that does matter is
               EventBridge -> TrafficShiftHandler: without a DLQ a repeatedly failing invoke
-              would eventually drop the failover event with nothing recording it. That is
+              would eventually drop the traffic transition event with nothing recording it. That is
               tolerable here only because every experiment is operator-initiated and verified
               against the runbook, so a lost event is recovered by re-running it. In production
               nobody is watching, so add a DLQ on the EventBridge rule target plus an alarm on
@@ -1431,7 +1431,7 @@ Resources:
       SourceAccount: !Ref 'AWS::AccountId'
       SourceArn: !Ref ConnectInstanceArn
 
-  # Created in BOTH regions so the paired region's replicated flow can invoke its own copy.
+  # Created in BOTH regions so the replica Region's replicated flow can invoke its own copy.
   AccountLookupAssociation:
     Type: AWS::Connect::IntegrationAssociation
     Properties:
@@ -1451,7 +1451,7 @@ Resources:
 
   # Associate the call-logger Lambda with THIS region's Connect instance so the
   # contact flow can invoke it. Created in both regions so ACGR can remap the ARN
-  # when it replicates the flow to the paired region.
+  # when it replicates the flow to the replica Region.
   CallLoggerAssociation:
     Type: AWS::Connect::IntegrationAssociation
     Properties:
@@ -1474,7 +1474,7 @@ Resources:
               Deliberately outside the VPC. This function calls only Connect and CloudWatch
               APIs; placing it in the VPC would require paid interface endpoints for no benefit
               and no change in exposure.
-    Condition: DeployAutoFailover
+    Condition: DeployAutoRegionSwitch
     Properties:
       FunctionName: ConnectChaos-TrafficShiftHandler
       Runtime: python3.13
@@ -1488,15 +1488,15 @@ Resources:
       Environment:
         Variables:
           # MUST be the full ARN, not the bare UUID. A TDG resolves by bare ID only in the
-          # region it was created in; from the paired region that returns
+          # region it was created in; from the replica Region that returns
           # ResourceNotFoundException. Passing the ARN lets EITHER region drive the TDG,
-          # which is what makes failover possible when the primary region is impaired.
-          FAILOVER_DELAY_SECONDS: !Ref FailoverDelaySeconds
+          # which is what makes traffic transition possible when the source Region is impaired.
+          REGION_SWITCH_DELAY_SECONDS: !Ref RegionSwitchDelaySeconds
           TRAFFIC_DISTRIBUTION_GROUP_ARN: !Sub
-            'arn:aws:connect:${PrimaryRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
+            'arn:aws:connect:${SourceRegion}:${AWS::AccountId}:traffic-distribution-group/${TrafficDistributionGroupId}'
           MY_REGION: !Ref 'AWS::Region'
-          PRIMARY_REGION: !Ref PrimaryRegion
-          PAIRED_REGION: !Ref PairedRegion
+          SOURCE_REGION: !Ref SourceRegion
+          REPLICA_REGION: !Ref ReplicaRegion
 
   # ── CloudWatch Alarms ──
   AlarmExp1Lambda:
@@ -1508,7 +1508,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
     Properties:
       AlarmName: !Sub 'ConnectChaos-Exp1-Lambda-${AWS::Region}'
@@ -1542,7 +1542,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
     Properties:
       AlarmName: !Sub 'ConnectChaos-Exp2-DynamoDB-${AWS::Region}'
@@ -1576,7 +1576,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
     Properties:
       AlarmName: !Sub 'ConnectChaos-Exp3-Latency-${AWS::Region}'
@@ -1604,7 +1604,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
     Properties:
       AlarmName: !Sub 'ConnectChaos-Exp4-Queue-${AWS::Region}'
@@ -1643,17 +1643,17 @@ Resources:
       - AlarmExp4Queue
     Properties:
       AlarmName: !Sub 'ConnectChaos-Composite-${AWS::Region}'
-      AlarmDescription: ANY component alarm triggers ACGR failover
+      AlarmDescription: ANY component alarm triggers ACGR traffic transition
       AlarmRule: !Sub 'ALARM("ConnectChaos-Exp1-Lambda-${AWS::Region}") OR ALARM("ConnectChaos-Exp2-DynamoDB-${AWS::Region}") OR ALARM("ConnectChaos-Exp3-Latency-${AWS::Region}") OR ALARM("ConnectChaos-Exp4-Queue-${AWS::Region}")'
       # ActionsEnabled stays true: the state change this alarm publishes is what the
-      # EventBridge rule below matches on. That is the failover path, and it does not
+      # EventBridge rule below matches on. That is the traffic transition path, and it does not
       # need an alarm action of its own.
       ActionsEnabled: true
 
   # NOTE: there is deliberately no SNS topic here. An AlarmNotificationTopic used to be
   # wired to AlarmActions/OKActions, but nothing was ever subscribed to it, so it published
   # into the void on every experiment while adding two security findings that had to be
-  # justified. Failover never depended on it - that runs CompositeAlarm -> EventBridge ->
+  # justified. Traffic transition never depended on it - that runs CompositeAlarm -> EventBridge ->
   # TrafficShiftHandler, which is unaffected.
   #
   # To get notified, create a topic and subscribe to it yourself, then add:
@@ -1757,12 +1757,12 @@ Resources:
       Tags:
         Name: ConnectChaos-Exp3-LexTimeout
 
-  # ── EventBridge (both regions — either can failover) ──
-  FailoverEventRule:
+  # ── EventBridge (both regions — either can traffic transition) ──
+  RegionSwitchEventRule:
     Type: AWS::Events::Rule
-    Condition: DeployAutoFailover
+    Condition: DeployAutoRegionSwitch
     Properties:
-      Name: !Sub 'ConnectChaos-Failover-${AWS::Region}'
+      Name: !Sub 'ConnectChaos-RegionSwitch-${AWS::Region}'
       EventPattern:
         source: [aws.cloudwatch]
         detail-type: ['CloudWatch Alarm State Change']
@@ -1774,14 +1774,14 @@ Resources:
         - Id: TrafficShift
           Arn: !GetAtt TrafficShiftHandler.Arn
 
-  FailoverEventPermission:
+  RegionSwitchEventPermission:
     Type: AWS::Lambda::Permission
-    Condition: DeployAutoFailover
+    Condition: DeployAutoRegionSwitch
     Properties:
       FunctionName: !Ref TrafficShiftHandler
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt FailoverEventRule.Arn
+      SourceArn: !GetAtt RegionSwitchEventRule.Arn
 
   # ── Dashboards ──
   RegionalDashboard:
@@ -1802,10 +1802,10 @@ Resources:
       DashboardName: ConnectChaos-Unified
       DashboardBody: !Sub
         - |
-          {"widgets":[{"type":"text","width":24,"height":1,"x":0,"y":0,"properties":{"markdown":"## Primary Region (${PrimaryRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":1,"properties":{"title":"Exp 1 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":1,"properties":{"title":"Exp 2 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":1,"properties":{"title":"Exp 3 code-hook duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":1,"properties":{"title":"Exp 4 queue wait (sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PrimaryRegion}"}]],"period":60}},{"type":"text","width":24,"height":1,"x":0,"y":6,"properties":{"markdown":"## Paired Region (${PairedRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":7,"properties":{"title":"Exp 1 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${PairedInstanceIdEffective}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":7,"properties":{"title":"Exp 2 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${PairedInstanceIdEffective}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":7,"properties":{"title":"Exp 3 code-hook duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":7,"properties":{"title":"Exp 4 queue wait (sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${PairedInstanceIdEffective}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${PairedRegion}"}]],"period":60}}]}
+          {"widgets":[{"type":"text","width":24,"height":1,"x":0,"y":0,"properties":{"markdown":"## Source Region (${SourceRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":1,"properties":{"title":"Exp 1 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum","region":"${SourceRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":1,"properties":{"title":"Exp 2 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${ConnectInstanceId}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum","region":"${SourceRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":1,"properties":{"title":"Exp 3 code-hook duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${SourceRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":1,"properties":{"title":"Exp 4 queue wait (sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${ConnectInstanceId}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${SourceRegion}"}]],"period":60}},{"type":"text","width":24,"height":1,"x":0,"y":6,"properties":{"markdown":"## Replica Region (${ReplicaRegion})"}},{"type":"metric","width":6,"height":5,"x":0,"y":7,"properties":{"title":"Exp 1 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${PairedInstanceIdEffective}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp1-Lambda",{"stat":"Sum","region":"${ReplicaRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":6,"y":7,"properties":{"title":"Exp 2 flow errors","metrics":[["AWS/Connect","ContactFlowErrors","InstanceId","${PairedInstanceIdEffective}","MetricGroup","ContactFlow","ContactFlowName","ConnectChaos-Exp2-DynamoDB",{"stat":"Sum","region":"${ReplicaRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":12,"y":7,"properties":{"title":"Exp 3 code-hook duration (ms)","metrics":[["AWS/Lambda","Duration","FunctionName","LexFulfillmentHandler",{"stat":"Maximum","region":"${ReplicaRegion}"}]],"period":60}},{"type":"metric","width":6,"height":5,"x":18,"y":7,"properties":{"title":"Exp 4 queue wait (sec)","metrics":[["AWS/Connect","LongestQueueWaitTime","InstanceId","${PairedInstanceIdEffective}","MetricGroup","Queue","QueueName","ConnectChaos-Overflow",{"stat":"Maximum","region":"${ReplicaRegion}"}]],"period":60}}]}
         - BotId: !GetAtt ConnectChaosBot.Id
           BotAliasId: !GetAtt ConnectChaosBotAlias.BotAliasId
-          PairedInstanceIdEffective: !Ref PairedConnectInstanceId
+          PairedInstanceIdEffective: !Ref ReplicaConnectInstanceId
 
   # ═══════════════════════════════════════════════════════════════
   # OPTIONAL: Synthetic Traffic Generator
@@ -1820,7 +1820,7 @@ Resources:
             reason: >-
               Fixed names are required, not incidental. ACGR mandates identical Lambda function
               names in both Regions, and the runbook, Makefile and make verify all address these
-              roles and alarms by name. Generated names would break failover and every
+              roles and alarms by name. Generated names would break traffic transition and every
               operational check.
           - id: W11
             reason: >-
@@ -1930,15 +1930,15 @@ Outputs:
   LexBotId:
     Condition: CreateLexLocally
     Value: !GetAtt ConnectChaosBot.Id
-    Description: Lex V2 Bot ID. With Lex GR enabled this same ID exists in the paired region.
+    Description: Lex V2 Bot ID. With Lex GR enabled this same ID exists in the replica Region.
   LexBotAliasId:
     Condition: CreateLexLocally
     Value: !GetAtt ConnectChaosBotAlias.BotAliasId
-    Description: Lex V2 Bot Alias ID. With Lex GR enabled this same ID exists in the paired region.
+    Description: Lex V2 Bot Alias ID. With Lex GR enabled this same ID exists in the replica Region.
   LexBotAliasArn:
     Condition: CreateLexLocally
     Value: !GetAtt ConnectChaosBotAlias.Arn
-    Description: Lex V2 Bot Alias ARN. With Lex GR enabled this same ARN is valid in the paired region.
+    Description: Lex V2 Bot Alias ARN. With Lex GR enabled this same ARN is valid in the replica Region.
   LambdaArn:
     Value: !GetAtt LexFulfillmentHandler.Arn
   FISExperiment1:

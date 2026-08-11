@@ -139,7 +139,7 @@ def validate(name, flow):
     body = json.dumps(flow)
     for service in ("lambda", "lex"):
         if f"arn:aws:{service}:" in body and f"arn:aws:{service}:$.AwsRegion:" not in body:
-            problems.append(f"a {service} ARN is pinned to one Region - the paired Region "
+            problems.append(f"a {service} ARN is pinned to one Region - the replica Region "
                             "would use the wrong one")
     if "Connected in region $.AwsRegion" not in body:
         problems.append("does not announce the serving Region")

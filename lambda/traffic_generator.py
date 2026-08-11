@@ -2,11 +2,11 @@
 Synthetic Traffic Generator for Amazon Connect FIS Chaos Engineering Sample.
 
 This Lambda generates synthetic CloudWatch metric data points that simulate
-real Amazon Connect traffic. Use this to validate alarms and failover without
+real Amazon Connect traffic. Use this to validate alarms and traffic transition without
 needing to place actual phone calls.
 
 Deployment: Optional — deploy alongside the main stack when you want to test
-alarm thresholds and failover logic without real telephony traffic.
+alarm thresholds and traffic transition logic without real telephony traffic.
 
 Environment Variables:
     CONNECT_INSTANCE_ID: Connect instance ID for metric dimensions
