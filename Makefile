@@ -489,7 +489,7 @@ verify:
 	     echo "        cannot be asserted here. 'make post-deploy' sets it; the baseline"; \
 	     echo "        call is the only real proof."; fi; \
 	echo; \
-	if [ "$$FAIL" = "0" ]; then echo "ALL CHECKS PASSED - ready to test (RUNBOOK step 3a)"; \
+	if [ "$$FAIL" = "0" ]; then echo "ALL CHECKS PASSED - ready to test (RUNBOOK Step 3, baseline call)"; \
 	else echo "SOME CHECKS FAILED - fix the above before testing"; exit 1; fi
 
 

@@ -47,7 +47,7 @@ Fix 10 has no section of its own; it was a one-line runtime bump.
 | [Operational findings](#operational-findings-real-telephony-testing) | The FIS config window (advice since corrected by Fix 24), and why all faults also raise Lambda errors |
 | [Investigated and REJECTED](#investigated-and-rejected--do-not-redo-these) | Plausible ideas that are wrong in practice |
 | [Open verification items](#open-verification-items) | What had not been proven, and now has |
-| [Baseline call](#baseline-call--verified-on-real-telephony-iad-448085478029) | VPC needs no NAT; correction to Fix 7 |
+| [Baseline call](#baseline-call--verified-on-real-telephony-iad-ported-tdg-number) | VPC needs no NAT; correction to Fix 7 |
 | [Tooling gaps](#tooling-gaps-closed-alongside-fixes-16-and-17) | Why `verify` and `reset` exist in their current form |
 | [Environmental hazard](#environmental-hazard--a-third-party-replicator-in-the-same-account) | Another stack deleting this sample's resources |
 
@@ -624,7 +624,7 @@ before a failover demonstration.
 
 ---
 
-## Baseline call — verified on real telephony (IAD, `+448085478029`)
+## Baseline call — verified on real telephony (IAD, ported TDG number)
 
 First real inbound call against the IAD/PDX deployment, before any experiment. Full chain
 passed: Connect → call-logger direct invoke → DynamoDB write → Lex → fulfillment code hook →
