@@ -1,21 +1,64 @@
 # Deployment Fixes & Findings
 
-This document records defects found while deploying and testing this sample against a
-real ACGR-paired Amazon Connect instance (London `eu-west-2` ↔ Frankfurt `eu-central-1`),
-the fixes applied to `cfn/main-template.yaml`, and important findings that are **not**
-bugs (so they aren't "fixed" by mistake later).
+Defects found while deploying and testing this sample against real ACGR-paired Amazon Connect
+instances — first London `eu-west-2` ↔ Frankfurt `eu-central-1`, then US East `us-east-1` ↔
+US West `us-west-2` — the fixes applied, and findings that are **not** bugs, recorded so they
+are not "fixed" by mistake later.
 
-## Summary
+All four experiments have since been validated end to end on real inbound calls.
 
-| # | Component | Symptom | Fix |
-|---|-----------|---------|-----|
-| 1 | Composite alarm | `CREATE_FAILED`: "Could not save the composite alarm as alarms [...] in the alarm rule do not exist" | Explicit `DependsOn` on the 4 child alarms |
-| 2 | Contact flows | `InvalidContactFlowException` on `MainIVRFlow` / `ChaosTestFlow` | Add required prompt (`Text`) to the `ConnectParticipantWithLexBot` block |
-| 3 | Lex bot | Locale build fails: "Slot ids [...] don't define a slot priority" → alias unbuilt/unusable | Add `SlotPriorities` to both intents |
-| 4 | FIS config bucket | Paired-region deploy fails: "Bucket name should be between 3 and 63 characters long" | Shorten bucket name prefix to `ccfis-` |
-| 5 | Connect ↔ Lex | Flows deploy but Lex is never reachable from Connect at call time | Add `AWS::Connect::IntegrationAssociation` (type `LEX_BOT`) |
-| 6 | Experiment 2 metric | Exp 2 (DDB disruption) never produced `ContactFlowErrors` — it failed over via `Lambda-Errors` instead | Invoke a dedicated call-logger Lambda **directly from the flow** so its DDB failure takes a flow Error branch |
-| 7 | Experiment 3 metric | Exp 3 (Lex delay) never produced `RuntimeLambdaErrors` on a real call — that metric isn't emitted for Connect's `StartConversation` voice path | Re-target the Exp 3 alarm to `LexFulfillmentHandler` **Duration** (the injected delay is directly observable) |
+## Index
+
+| # | Area | Symptom | How it was found |
+|---|------|---------|------------------|
+| [1](#fix-1--composite-alarm-missing-dependson-deploy-blocker) | Composite alarm | `CREATE_FAILED`: child alarms "do not exist" | deploy failed |
+| [2](#fix-2--contact-flow-lex-block-missing-required-prompt-deploy-blocker) | Contact flow | `InvalidContactFlowException` | deploy failed |
+| [3](#fix-3--lex-intents-missing-slotpriorities-runtime-blocker) | Lex bot | locale build fails, alias unusable | deploy failed |
+| [4](#fix-4--fis-config-bucket-name-exceeds-s3s-63-char-limit-in-some-regions) | FIS bucket | name exceeds S3's 63-char limit | deploy failed |
+| [5](#fix-5--missing-lex-integrationassociation-runtime-correctness) | Connect ↔ Lex | flows deploy, Lex unreachable at call time | real call |
+| [6](#fix-6--experiment-2-never-produced-contactflowerrors-metric-mismatch-bug) | Exp 2 metric | never produced `ContactFlowErrors` | real call |
+| [7](#fix-7--experiment-3-never-produced-runtimelambdaerrors-on-a-real-call) | Exp 3 metric | `RuntimeLambdaErrors` never emitted | real call |
+| [8](#fix-8--flows-hardcoded-the-primary-regions-lex-arn-breaks-the-core-claim) | Flows / ACGR | paired Region invoked the **primary** Region's Lex | inspection |
+| [9](#fix-9--experiment-4-was-not-reproducible) | Exp 4 | `MissedCalls` needs a staffed agent — not reproducible | inspection |
+| 10 | Lambda runtime | `python3.12` → `python3.13` | inspection |
+| [11](#fix-11--vpc-prerequisite-removed-and-why-s3-matters-as-much-as-dynamodb) | VPC | reader had to supply a VPC reaching DynamoDB **and S3** | inspection |
+| [12](#fix-12--fis-extension-layer-arn-now-resolves-itself) | FIS layer ARN | hand-copied per Region; wrong value fails silently | inspection |
+| [13](#fix-13--no-manual-bucket-no-manual-zipping) | Code bucket | manual create + zip + upload | inspection |
+| [14](#fix-14--awslexbot-replication-did-not-leave-a-persistent-gr-replica) | Lex GR | replica vanished; stack still reported healthy | `make verify` |
+| [15](#fix-15--alarm-thresholds-made-a-working-fault-unobservable-exps-1-and-2) | Alarms | fault worked, alarm never fired (`1 > 5` is false) | real call |
+| [16](#fix-16--the-flow-pinned-the-call-logger-lambda-to-the-primary-region) | Flows / ACGR | paired Region invoked the **primary** Region's Lambda | real call |
+| [17](#fix-17--the-paired-region-could-never-fail-over-bare-tdg-id--wrong-iam-scope) | Failover | paired Region could never drive the TDG | forced alarm |
+| [18](#fix-18--every-experiment-produced-the-same-prompt-and-shared-metrics) | Experiments | all four sounded identical and shared metrics | real call |
+| [19](#fix-19--two-undocumented-flow-validation-rules-found-by-a-failed-stack-update) | Flow language | bare `InvalidContactFlowException`, no detail | deploy failed |
+| [20](#fix-20--the-new-lookup-lambda-could-not-read-its-fis-fault-config) | IAM | extension could not read its fault config | log line |
+| [21](#fix-21--cloudformation-shipped-stale-lambda-code-silently-breaking-all-failover) | Deployment | **stale Lambda code**; all failover dead, everything green | forced alarm |
+| [22](#fix-22--failover-was-too-fast-to-observe-added-a-configurable-dwell) | Failover | repaired 93 s after the failure — too fast to demo | real call |
+| [23](#fix-23--a-dwelling-handler-ignored-everything-that-happened-while-it-slept) | Failover | a sleeping handler silently undid `make reset` | measurement |
+| [24](#fix-24--experiment-3-only-ever-worked-on-a-cold-start-and-three-fis-behaviours-nobody-documents-together) | Exp 3 / FIS | fault only applied on a **cold start** | real call |
+| [25](#fix-25--experiment-4s-fault-was-global-so-failover-could-never-recover-from-it) | Exp 4 / ACGR | fault lived in replicated data — failover could not recover | inspection |
+
+Fix 10 has no section of its own; it was a one-line runtime bump.
+
+### Findings that are not fixes
+
+| Section | Why it matters |
+|---|---|
+| [NOT bugs — do not "fix" these](#not-bugs--do-not-fix-these) | Deliberate choices that look like defects |
+| [Operational findings](#operational-findings-real-telephony-testing) | The FIS config window (advice since corrected by Fix 24), and why all faults also raise Lambda errors |
+| [Investigated and REJECTED](#investigated-and-rejected--do-not-redo-these) | Plausible ideas that are wrong in practice |
+| [Open verification items](#open-verification-items) | What had not been proven, and now has |
+| [Baseline call](#baseline-call--verified-on-real-telephony-iad-448085478029) | VPC needs no NAT; correction to Fix 7 |
+| [Tooling gaps](#tooling-gaps-closed-alongside-fixes-16-and-17) | Why `verify` and `reset` exist in their current form |
+| [Environmental hazard](#environmental-hazard--a-third-party-replicator-in-the-same-account) | Another stack deleting this sample's resources |
+
+### The pattern worth noticing
+
+Of the defects that mattered most — 15, 16, 20, 21, 24, 25 — **not one was caught by
+`cfn-lint`, by CloudFormation succeeding, or by alarms reporting `OK`**. Every one needed a real
+call, a log line read on purpose, a forced alarm, or someone asking "but would that actually
+work?". Fix 21 is the extreme case: every stack reported `UPDATE_COMPLETE`, every alarm `OK`,
+`make verify` passed, EventBridge showed the rule matching with no failed invocations, and a
+baseline call succeeded — while failover was completely dead in both Regions.
 
 ---
 
@@ -259,22 +302,29 @@ shifted London 0% / Frankfurt 100%.
 These are not template bugs, but behaviors you must account for when demonstrating the
 experiments with real inbound calls.
 
-### FIS Lambda-extension experiments have a ~180 s config-freshness window (Exp 1 & 3)
+### FIS Lambda-extension experiments have a config-freshness window (Exp 1 & 3)
+
+> **⚠️ Superseded by [Fix 24](#fix-24--experiment-3-only-ever-worked-on-a-cold-start-and-three-fis-behaviours-nobody-documents-together). The operational
+> advice below was wrong in the way that matters: it told the reader to call *immediately*, which
+> is the one thing that reliably produces no fault.** The window is real, but it is not the
+> binding constraint — the extension has to *arm* first, and until Fix 24 it usually did not arm
+> at all on a warm invocation. Corrected guidance: **start the experiment, wait ~60 s, then
+> call.** Measured arming time after Fix 24 is ~53 s.
 
 `aws:lambda:invocation-error` (Exp 1) and `aws:lambda:invocation-add-delay` (Exp 3) work
 through the **AWS FIS Lambda extension** (the layer added to `LexFulfillmentHandler`). The
-extension reads its fault config from S3 (`AWS_FIS_CONFIGURATION_LOCATION`), polls roughly
-every 60 s, and **ignores any config older than ~180 s**. Practical consequences:
+extension reads its fault config from S3 (`AWS_FIS_CONFIGURATION_LOCATION`), polls on an
+interval, and ignores a config it considers stale.
 
-- A real call must land **within ~3 minutes** of starting the experiment, otherwise the
-  extension treats the config as stale and the invocation runs normally (no fault).
-- If your first test call misses the window, re-start the experiment and call again
-  promptly.
+The original reading of that behaviour produced the advice "call within ~3 minutes, and if you
+miss the window re-start and call promptly". Following it fails, because a *promptly* placed call
+hits a warm container whose polling thread never gets enough wall-clock time to fetch the config.
+Fix 24 explains the mechanism and the two environment variables that fix it.
 
-Experiment 2 (`aws:network:disrupt-connectivity`) is **network-level**, not
-extension-based, so it has **no 180 s window** — the DynamoDB path is severed for the
-entire experiment duration. This is why Exp 2 is the most reliable to demo with a live
-call, and why the health-check Lambda in Fix 6 is a clean fit.
+Experiment 2 (`aws:network:disrupt-connectivity`) is **network-level**, not extension-based, so
+none of this applies — the DynamoDB path is severed for the entire experiment duration and there
+is no wait before calling. This is why Exp 2 is the most reliable to demo with a live call, and
+why the health-check Lambda in Fix 6 is a clean fit.
 
 ### All faults ultimately manifest as `AWS/Lambda Errors` too
 
@@ -314,18 +364,6 @@ central claim; 11–13 remove prerequisites. Everything here was verified agains
 documentation or a live API call, and the record below deliberately includes **two ideas that
 were investigated and rejected**, so they are not "fixed" again later.
 
-## Summary
-
-| # | Component | Symptom | Fix |
-|---|-----------|---------|-----|
-| 8 | Contact flows | After failover the paired region invoked the **primary** region's Lex bot, so the "served locally" claim was false | Use the ACGR `$.AwsRegion` runtime token in the flow's Lex alias ARN |
-| 9 | Experiment 4 | `MissedCalls` cannot be produced without a staffed agent deliberately not answering — not reproducible by a reader | Route the failure path to a **no-agent** queue and alarm on `LongestQueueWaitTime` |
-| 10 | Lambda runtime | `python3.12` | `python3.13` (supported to Jun 2029) |
-| 11 | VPC | The reader had to supply a VPC whose subnets could reach DynamoDB **and S3** | `CreateVpc=true` builds it, with free gateway endpoints |
-| 12 | FIS layer ARN | Hand-copied per region; both the publishing account and version differ, so a wrong value fails silently | Resolve from the AWS public SSM parameter |
-| 13 | Code bucket | Manual create + zip + upload to an exact prefix | `make` creates the bucket and uploads; also stages the oversized template |
-
----
 
 ## Fix 8 — Flows hardcoded the primary region's Lex ARN (breaks the core claim)
 
@@ -380,9 +418,13 @@ primary-only and replicated by ACGR, which also remaps the flow's queue referenc
 
 `MissedCallsThreshold` is replaced by `QueueWaitSecondsThreshold` (default 60).
 
-> **Not yet validated on real telephony.** The mechanism is sound and the dimensions are
-> confirmed, but unlike Exps 1–3 this has not been proven with a live call. Treat the first
-> run as its verification.
+> **Validated on real telephony.** A call held on the line after the hold prompt produced
+> `LongestQueueWaitTime = 96` (19:35 UTC) against the 60 s threshold, and the alarm moved
+> `OK → ALARM` at 19:36:28 UTC, returning to `OK` at 19:39:28 UTC once the flag was cleared.
+> No agent was involved at any point, which was the whole objective. The first attempt failed
+> for a reason worth recording: the caller hung up 8 s after the queue transfer. See
+> [Fix 25](#fix-25--experiment-4s-fault-was-global-so-failover-could-never-recover-from-it)
+> for the region-scoping that had to land before the recovery half of this experiment worked.
 
 ---
 
@@ -495,13 +537,26 @@ under an 8 s limit and must surface a DynamoDB failure as a handled error.
 
 ## Open verification items
 
-Not yet proven on real telephony:
+All three items that were open here have since been closed on real telephony. They are kept,
+with their evidence, because "the mechanism is sound" is not the same claim as "it worked on a
+phone call", and the distinction is the point of this file.
 
-1. **Fix 8** — a call answered in the paired region, confirmed via that region's Lambda logs.
-2. **Fix 9** — `LongestQueueWaitTime` breaching on a genuinely unstaffed queue.
-3. **Fix 11** — that a VPC-attached Lambda writes CloudWatch Logs through only DynamoDB and
-   S3 gateway endpoints. If logs are missing after the first deploy, add a CloudWatch Logs
-   interface endpoint (~$7/month/AZ). This was deliberately not added speculatively.
+| Was open | Now | Evidence |
+|---|---|---|
+| **Fix 8** — a call answered in the paired Region, confirmed from that Region's own Lambda logs | **Closed** | Contact at 19:33:08: `LexFulfillmentHandler` and `ConnectChaos-CallLogger` logged the invocation in `us-west-2` only; `us-east-1` stayed idle for the same window. Fix 16 had to land first — the flow was pinning the Lambda to the primary Region. |
+| **Fix 9** — `LongestQueueWaitTime` breaching on a genuinely unstaffed queue | **Closed** | `LongestQueueWaitTime = 96` at 19:35 UTC on `ConnectChaos-Overflow` (threshold 60); alarm `OK → ALARM` 19:36:28 UTC, `ALARM → OK` 19:39:28 UTC. No agent, no routing profile, no human step. |
+| **Fix 11** — that a VPC-attached Lambda writes CloudWatch Logs through DynamoDB and S3 gateway endpoints alone | **Closed** | Every finding in this document from Fix 16 onward was diagnosed from `LexFulfillmentHandler` and `ConnectChaos-CallLogger` log events. Both are VPC-attached with no NAT, no IGW and no CloudWatch Logs interface endpoint. The speculative endpoint (~$7/month/AZ) was correctly not added. |
+
+**What closing them actually took.** None of the three failed because the mechanism was wrong;
+each failed because something *else* was wrong, and the missing verification was what surfaced
+it. Fix 8 was blocked by a hardcoded Lambda ARN (Fix 16) and then by a Region-scoped IAM policy
+and a bare TDG id (Fix 17). Fix 9 was blocked twice — once by stale Lambda code that
+CloudFormation never shipped (Fix 21), and once by a globally replicated chaos flag (Fix 25) —
+and its first live attempt still produced a false negative because the caller hung up 8 s into a
+60 s threshold. Fix 11 needed nothing, which is only knowable in hindsight.
+
+That is the argument for keeping a list like this rather than deleting it: an unverified item is
+a place where several unrelated defects can hide at once, all of them reporting healthy.
 
 ---
 
@@ -979,11 +1034,18 @@ Lambda rejects that sentinel explicitly; otherwise a silent caller would look li
 raise `ContactFlowErrors` on all four `ContactFlowName` dimensions at once and destroy the
 attribution this redesign exists to create.
 
-**Exp 3 keeps a Lambda metric on purpose.** It is a *latency* fault: the function returns
-cleanly at ~31 s with `Errors=0` (Fix 7), so there may be no flow error to count. Whether Lex's
-30 s code-hook timeout trips the block's error branch is **unverified**. A latency threshold is
-the honest measurement for a latency fault; `ContactFlowErrors` for that flow is on the
-dashboard as observation-only, and could become the alarm if it proves reliable.
+**Exp 3 keeps a Lambda metric on purpose, and the live run vindicated the choice.** It is a
+*latency* fault: the function returns cleanly at ~31 s with `Errors=0` (Fix 7), so there may be no
+flow error to count. Whether Lex's 30 s code-hook timeout trips the block's error branch was
+recorded here as unverified — **it was measured and it does not produce a countable flow error.**
+The validated run showed `Duration` Maximum **31,232 ms**, `Errors` **0.0**, and
+**no `ContactFlowErrors` datapoint at all** on `ConnectChaos-Exp3-Latency`. Connect handles the
+condition internally, exactly as Fix 6 predicted for handled Lex errors.
+
+Had Exp 3 alarmed on `ContactFlowErrors`, it would never have fired. The latency threshold is not
+merely the more honest measurement for a latency fault, it is the only one that works.
+`ContactFlowErrors` for that flow stays on the dashboard as observation-only, and should **not**
+be promoted to the alarm.
 
 **Error types are per-action and not interchangeable.** The generator asserts this because Fix 2
 was an `InvalidContactFlowException` from getting it wrong: `Compare` accepts only
@@ -1493,15 +1555,23 @@ sample rather than a deliberate lesson. Scoping the flag gets both: a working fo
 make the 90-second silent wait observable and give per-Region evidence from inside the queue, but
 it is observability rather than correctness, and it needs verification of whether
 `AWS::Connect::Queue` can attach a customer-queue flow declaratively or requires a post-deploy
-API call. Worth revisiting once Exp 4 is proven end to end.
+API call. Now that Exp 4 is proven end to end, this is the obvious next improvement: the first
+live attempt failed *only* because the caller could not tell how long they had been queued.
 
-### Still unproven
+### The open question this fix left — now answered
 
-This fix does not address the open question about Experiment 4: whether
-`fulfillment_state='Failed'` causes Connect to take the Lex block's **error** branch at all. That
-is a valid Lex response rather than an exception, so Connect may match the intent-name condition
+This fix deliberately did not settle whether `fulfillment_state='Failed'` causes Connect to take
+the Lex block's **error** branch at all. The concern was legitimate: `Failed` is a *valid* Lex
+response rather than an exception, so Connect could reasonably match the intent-name condition
 and route to the success path, never reaching the queue in *either* Region. Experiment 3 showed
-the Lex error branch does fire on a code-hook *timeout*, which is encouraging but a different
-trigger. One test call settles it: hearing *"All agents are currently busy"* confirms the
-mechanism; hearing *"I found your information"* means the flow needs fixing before this fix
-matters.
+the error branch fires on a code-hook **timeout**, which is a different trigger.
+
+**It does take the error branch.** The test call reached the hold prompt and the contact was
+enqueued on `ConnectChaos-Overflow`, which is only reachable from the failure path — and the
+queue-wait metric then rose to 96 s. So Connect treats a `Failed` fulfillment state as an error
+condition on the Lex block, not merely as an intent match to be routed onward.
+
+Worth stating plainly because it is the kind of behaviour that is easy to assume in either
+direction from the documentation alone. The evidence here is one Region and one bot
+configuration; treat it as confirmed for this sample rather than as a general guarantee about
+every Lex-in-Connect setup.

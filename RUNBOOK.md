@@ -10,9 +10,10 @@ verifying before moving on.
 > 1. **Failover is one-way by design.** When an experiment trips the composite alarm,
 >    `TrafficShiftHandler` sets that region to 0% and nothing shifts it back. Run **Step R**
 >    after every experiment or all later tests start from an already-failed-over state.
-> 2. **Experiments 1 and 3 have a ~180 second window.** They work through the FIS Lambda
->    extension, which ignores fault config older than ~180 s. A real call must land within
->    ~3 minutes of starting the experiment. Experiment 2 has no such limit.
+> 2. **Experiments 1 and 3 need ~55 s to arm. Do not call immediately.** Their fault arrives
+>    through the FIS Lambda extension, which has to poll S3 first. Start the experiment, wait
+>    about a minute, then call. Calling straight away is the commonest way to think an
+>    experiment is broken — the call simply succeeds. Experiment 2 applies immediately.
 
 ---
 
@@ -69,9 +70,10 @@ is in **[docs/BLOCK-DIAGRAM.md](docs/BLOCK-DIAGRAM.md)**.
 1. **Seed the tables** (step 3) — they are new and empty.
 2. **Baseline call** (step 3a) — proves the healthy path AND settles whether a VPC Lambda
    writes CloudWatch Logs with only DynamoDB and S3 gateway endpoints.
-3. **Experiment 2 first** — it is the only fault with **no ~180 s window**, so it is the
+3. **Experiment 2 first** — it is the only fault with **no arming delay**, so it is the
    most forgiving to verify and the best first proof of the failover chain.
-4. Then Experiment 4, then 1 and 3 (both need a call within ~3 minutes).
+4. Then Experiment 4, then 1 and 3 (both need **~55 s of arming** before the call — start the
+   experiment, wait about a minute, *then* dial).
 5. Finally the **paired-region proof** — a call answered in PDX.
 
 > **Use the SAME digit for the recovery call.** After failover, dial again and press the digit
@@ -395,7 +397,7 @@ aws fis start-experiment --experiment-template-id $EXP1 --region $PRIMARY_REGION
   --query "experiment.{id:id,state:state.status}"
 ```
 
-**⚠️ Call within 180 seconds.** Or use the generator:
+**⚠️ Wait ~60 s for the fault to arm, then call.** Calling sooner means no fault is applied. Or use the generator:
 
 ```bash
 aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
@@ -427,7 +429,7 @@ aws logs tail /aws/lambda/ConnectChaos-TrafficShiftHandler --region $PRIMARY_REG
 
 ## Experiment 2 — DynamoDB unreachable  *(most reliable for a live demo)*
 
-**Fault:** both Lambda subnets blocked from the DynamoDB endpoint at the NACL. No 180 s
+**Fault:** both Lambda subnets blocked from the DynamoDB endpoint at the NACL. No arming
 window — the path stays severed for the whole experiment.
 **Expect:** the flow's direct call-logger invoke fails → flow Error branch →
 `ContactFlowErrors` → `ConnectChaos-Exp2-DynamoDB-{region}` ALARM.
@@ -487,7 +489,7 @@ aws fis start-experiment --experiment-template-id $EXP3 --region $PRIMARY_REGION
   --query "experiment.{id:id,state:state.status}"
 ```
 
-**⚠️ Call within 180 seconds.**
+**⚠️ Wait ~60 s for the fault to arm, then call.** Calling sooner means no fault is applied.
 
 ```bash
 aws cloudwatch describe-alarms --alarm-names ConnectChaos-Exp3-Latency-$PRIMARY_REGION \
@@ -526,7 +528,9 @@ aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag#'$PRIMARY_REGION'"},"enabled":{"BOOL":true}}'
 ```
 
-Call, press **4**, and **stay on the line past the threshold**, or:
+Call and press **4**. When you hear *"All agents are currently busy. Please hold"*, **start
+counting from that moment** and stay on the line a further **90 seconds**. Or drive it
+synthetically:
 
 ```bash
 aws lambda invoke --function-name $GEN --region $PRIMARY_REGION \
@@ -566,13 +570,28 @@ aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
 
 **Two things that produce a false negative here:**
 
-1. **Hanging up too early.** The threshold is 60 s of *queue wait*, so the contact has to sit
-   in the queue past that. Stay on the line for at least 90 s after the transfer.
-2. **Choosing the wrong menu option.** The chaos flag path is in **`ConnectChaos-Exp4-Queue`**, not the
-   Main IVR. If your phone number points at the Main IVR you will see the Lex failure but no
-   queue transfer, so no queue wait accumulates.
+1. **Hanging up too early — measure from the hold prompt, not from dialling.** The threshold is
+   60 s of *queue wait*, and the IVR itself consumes about a minute before the transfer
+   (region announcement, Lex prompt, your reply, the account number, the code hook). A measured
+   failed attempt:
 
-> This experiment has not yet been validated on real telephony — this run is its first test.
+   ```
+   19:27:09  call starts
+   19:28:08  transferred to the queue   <- the 60 s clock starts HERE
+   19:28:15  caller hung up             <- only 8 s of queue wait; threshold is 60
+   ```
+
+   That call lasted 66 s, which sounds like plenty, and produced
+   `LongestQueueWaitTime = 8`. Stay on the line **90 s after the hold prompt begins** — a total
+   call of roughly two and a half minutes.
+2. **Choosing the wrong menu option.** The chaos flag path lives only in
+   **`ConnectChaos-Exp4-Queue`**, reached by pressing **4** at `ConnectChaos-Menu`. Any other
+   digit runs a different experiment's flow, where you will see the Lex failure but no queue
+   transfer — so no queue wait accumulates.
+
+> **Validated on real telephony.** A call that stayed on the line produced
+> `LongestQueueWaitTime = 96` at 19:35 UTC against the 60 s threshold; the alarm went
+> `OK → ALARM` at 19:36:28 UTC and returned to `OK` at 19:39:28 UTC after **Step R**.
 > If the metric never appears, list the real dimensions and compare them against the alarm:
 > `aws cloudwatch list-metrics --namespace AWS/Connect --metric-name LongestQueueWaitTime --region us-east-1`
 
@@ -613,12 +632,12 @@ Then restore with **Step R**.
 
 ## Run order
 
-| # | Experiment | Trigger | Alarm | 180 s window |
+| # | Experiment | Trigger | Alarm | Wait before calling |
 |:-:|---|---|---|:-:|
-| 1 | Lambda failure | `start-experiment $EXP1` | `ConnectChaos-Exp1-Lambda-*` | **yes** |
-| 2 | DynamoDB unreachable | `start-experiment $EXP2` | `ConnectChaos-Exp2-DynamoDB-*` | no |
-| 3 | Lex code-hook latency | `start-experiment $EXP3` | `ConnectChaos-Exp3-Latency-*` | **yes** |
-| 4 | Flow failure → no-agent queue | set `chaos_flag=true` | `ConnectChaos-Exp4-Queue-*` | no |
+| 1 | Lambda failure | `start-experiment $EXP1` | `ConnectChaos-Exp1-Lambda-*` | **~55 s** |
+| 2 | DynamoDB unreachable | `start-experiment $EXP2` | `ConnectChaos-Exp2-DynamoDB-*` | none |
+| 3 | Lex code-hook latency | `start-experiment $EXP3` | `ConnectChaos-Exp3-Latency-*` | **~55 s** |
+| 4 | Flow failure → no-agent queue | set `chaos_flag#<region>=true` | `ConnectChaos-Exp4-Queue-*` | none |
 
 Step R after every one.
 
@@ -629,7 +648,7 @@ Step R after every one.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Alarm stuck `INSUFFICIENT_DATA` | No datapoints match its dimension tuple | `aws cloudwatch list-metrics --namespace <ns> --metric-name <name>` and compare with the alarm |
-| Exp 1 or 3 had no effect | Call landed outside the ~180 s window | Restart the experiment, call promptly |
+| Exp 1 or 3 had no effect | Called before the fault armed (~55 s) | Wait ~60 s after `start-experiment`, then call |
 | Exp 2 alarm flat | `ContactFlowErrors` needs **real** contacts | Place a live call, or use `fault_type=dynamodb` |
 | Paired region answers nothing | Paired stack missing, or no Lex bot there | Step 2a |
 | Primary logs a call after failover | Flow still points at the primary's Lex | `$.AwsRegion` / Lex GR — step 2a |

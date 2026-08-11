@@ -149,7 +149,7 @@ Always confirm with `make verify` before demonstrating a failover.
  │                                        │
  │                                        ▼
  │                              AWS/Lambda  Errors  ▲          Duration ≈ 0
- │   ⚠ ~180 s window: call must land within ~3 min of starting
+ │   ⚠ arms ~55 s after start: WAIT ~60 s, then call
  │
  EXP 2 ── FIS: aws:network:disrupt-connectivity (scope=dynamodb) ── EXT52xQ3YYqgvC2kx
  │   FIS clones the NACL on BOTH subnets and denies the DynamoDB endpoint
@@ -167,7 +167,7 @@ Always confirm with `make verify` before demonstrating a failover.
  │                                        │
  │                                        ▼ runs slow but RETURNS CLEANLY
  │                              AWS/Lambda  Duration ≈ 31 000 ms ▲   Errors = 0
- │   ⚠ ~180 s window applies
+ │   ⚠ arms ~55 s after start: WAIT ~60 s, then call
  │   (deliberately NOT AWS/Lex RuntimeLambdaErrors — never emitted on Connect's
  │    real StartConversation voice path. See FIXES.md Fix 7.)
  │

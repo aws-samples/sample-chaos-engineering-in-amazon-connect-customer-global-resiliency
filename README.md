@@ -109,7 +109,7 @@ without running it, so the flow takes the block's Error branch.
 - A wrong or missing account number does **not** error. The Lambda returns `NOT_FOUND` /
   `INVALID_INPUT` and the flow branches on it with a `Compare` block, so a mistyped number can
   never masquerade as an injected fault.
-- **⚠️ 180-second window** — see [Operational constraints](#operational-constraints).
+- **⚠️ Wait ~55 s after starting before you call** — the fault has to arm. See [Operational constraints](#operational-constraints).
 
 ### Experiment 2 — DynamoDB unreachable
 FIS blocks both Lambda subnets from the DynamoDB endpoint at the network ACL.
@@ -120,7 +120,7 @@ so the DynamoDB failure takes the flow's Error branch.
 - The call logger lives **only** in this flow. Putting it in every flow would make an Exp 2
   fault raise `ContactFlowErrors` on all four `ContactFlowName` dimensions at once and destroy
   the attribution this design exists to provide.
-- **No 180 s window** — network-level, so the DynamoDB path is severed for the whole
+- **No arming delay and no expiry** — network-level, so the DynamoDB path is severed for the whole
   experiment. **This is the most reliable experiment to demo with a live call.**
 
 ### Experiment 3 — Lex code-hook latency
@@ -135,7 +135,7 @@ slow but still returns cleanly. Observed as Lambda **Duration**, not an error.
 - **Why not `AWS/Lex RuntimeLambdaErrors`?** It is never emitted for this bot — see
   [FIXES.md](FIXES.md) Fix 7 and its correction. Duration also stays cleanly distinct from
   Exp 1, where the function never runs.
-- **⚠️ 180-second window** applies.
+- **⚠️ Wait ~55 s after starting before you call**, as with Exp 1.
 
 ### Experiment 4 — Contact flow failure → no-agent queue
 A DynamoDB chaos flag makes the fulfillment Lambda return `Failed` to Lex.
@@ -152,7 +152,7 @@ contact there. It waits indefinitely and `LongestQueueWaitTime` climbs.
   never recover: the caller would land in a Region reading the same broken row and queueing into
   the same unstaffed queue. This is the one genuinely important lesson in the sample — *a
   dependency failure that lives in replicated data is not a regional failure, and traffic
-  shifting will not fix it.* See [FIXES.md](FIXES.md) Fix 25. **Stay on the line ≥ 90 s**, since the
+  shifting will not fix it.* See [FIXES.md](FIXES.md) Fix 25. **Stay on the line ≥ 90 s after the hold prompt begins** (not 90 s from dialling — the IVR takes about a minute first), since the
   signal is accumulated queue wait, not a count.
 
 ---
@@ -181,12 +181,13 @@ operator can confirm the fault is genuinely resolved first. See Step R in the ru
 |----------|:---:|:---:|---|
 | VPC, 2 private subnets, route table, SG | ✓ | ✓ | Created when `CreateVpc=true` (default) |
 | Gateway endpoints — DynamoDB + S3 | ✓ | ✓ | Free; S3 is required by the FIS extension |
-| Contact flows — Main IVR + Chaos Test | ✓ | ✓ | Created in primary, ACGR replicates |
+| Contact flows ×5 — `Menu` + one per experiment | ✓ | ✓ | Created in primary, ACGR replicates |
 | Queue `ConnectChaos-Overflow` + 24×7 hours | ✓ | ✓ | Created in primary, ACGR replicates |
 | Lex V2 bot + version + alias | ✓ | ✓ | Primary creates; Lex GR replicates (same IDs) |
 | Connect ↔ Lex `IntegrationAssociation` | ✓ | ✓ | Per region, against its local bot |
 | `LexFulfillmentHandler` (40 s timeout) | ✓ | ✓ | Per region, same name in both (ACGR requirement) |
-| `ConnectChaos-CallLogger` | ✓ | ✓ | Per region; invoked directly by the flow |
+| `ConnectChaos-CallLogger` | ✓ | ✓ | Per region; invoked directly by the Exp 2 flow |
+| `ConnectChaos-AccountLookup` | ✓ | ✓ | Per region; invoked directly by the Exp 1 flow (FIS-instrumented) |
 | `ConnectChaos-TrafficShiftHandler` | ✓ | ✓ | Requires `EnableAutoFailover=true` |
 | DynamoDB global tables ×3 | ✓ | ✓ | Created in primary, auto-replicated |
 | S3 — FIS config bucket (`ccfis-…`) | ✓ | ✓ | Created per region |
@@ -334,16 +335,34 @@ aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
 
 Real behaviours you must account for. None are template bugs.
 
-### The FIS Lambda extension has a ~180 s config-freshness window (Exp 1 & 3)
+### Experiments 1 and 3 need ~55 s to arm — do not call immediately
 
-Experiments 1 and 3 work through the FIS Lambda extension layer, which reads its fault
-config from S3, polls roughly every 60 s, and **ignores config older than ~180 s**.
+Experiments 1 and 3 apply their fault through the FIS Lambda extension, which polls S3 for
+fault configuration. Measured on this sample:
 
-- A real call must land **within ~3 minutes** of starting the experiment, or the invocation
-  runs normally with no fault applied.
-- If you miss the window, restart the experiment and call again promptly.
+```
+start-experiment -> fault actually effective : ~55 s
+experiment duration                          : PT5M
+```
 
-Experiment 2 is network-level and has **no such window**.
+So **wait about a minute after starting, then call.** Calling immediately is the single most
+common way to conclude an experiment is broken: the invocation runs normally, you hear
+*"Welcome back, John Doe"*, and nothing is wrong except the timing. It happened four times in a
+row during this sample's own validation.
+
+The window therefore *opens* at ~55 s and closes when the experiment ends, leaving roughly four
+usable minutes.
+
+Two settings shorten the arming delay and make the fault apply to **warm** containers, which it
+otherwise does not — see [FIXES.md](FIXES.md) Fix 24:
+
+```yaml
+AWS_FIS_POLL_MAX_WAIT_MILLISECONDS: '3000'
+AWS_FIS_SLOW_POLL_INTERVAL_SECONDS: '20'   # 20 is the minimum the extension accepts
+```
+
+Experiment 2 is network-level: it applies immediately and never expires, which makes it the
+easiest to demonstrate.
 
 ### The template exceeds CloudFormation's inline limit
 
