@@ -9,6 +9,21 @@ where the call is still answered.
 > sample assumes you already have an ACGR-paired Connect instance and a Traffic Distribution
 > Group with a **ported** phone number attached.
 
+> ### ⚠️ Non-production sample — deploy into a dedicated AWS account
+>
+> The FIS execution role can create, modify, delete and re-associate network ACLs on **any VPC in
+> the account you deploy into**, not just the one this stack creates. FIS builds the cloned ACL at
+> run time, so no ARN can be scoped in advance. A mis-targeted experiment can sever connectivity
+> for unrelated workloads in the same account — the blast radius is the account, so the account is
+> the isolation boundary.
+>
+> Every FIS experiment here carries a bounded duration and a stop condition on its own alarm, so
+> disruption is time-limited and self-reverting. That limits duration, not scope.
+>
+> **Before any production use**, work through
+> [SECURITY-FINDINGS.md → Production hardening](SECURITY-FINDINGS.md#production-hardening). That
+> file also records the disposition and justification for all 54 static-analysis findings.
+
 **This file explains what the sample is, how it works, and how to install it.**
 **[RUNBOOK.md](RUNBOOK.md) is the procedure for running the experiments** — every test command,
 what to press on the keypad, what you should hear, and what to check afterwards. Install from
@@ -550,7 +565,6 @@ alarms, and a smoke invoke of the traffic-shift handler. It must exit `0` before
 | S3 — FIS config bucket (`ccfis-…`) | ✓ | ✓ | Per Region |
 | FIS experiment templates ×3 | ✓ | ✓ | Per Region. Exp 4 is not a FIS experiment |
 | CloudWatch alarms ×4 + composite | ✓ | ✓ | Per Region |
-| SNS topic for alarm notifications | ✓ | ✓ | Subscribe manually after deploy |
 | Dashboard | ✓ | ✓ | `regional` or `unified` |
 
 **No NAT gateway and no internet gateway are created.** Only DynamoDB and S3 reachability is
@@ -575,8 +589,16 @@ Dashboard **`ConnectChaos-{region}`**, one panel per experiment:
 `ContactFlowErrors` for the Exp 3 flow is also on the dashboard as an **observation-only** panel.
 It should not become the alarm — see [Experiment 3](#experiment-3--the-lex-code-hook-becomes-too-slow-to-be-useful).
 
-An `AlarmNotificationTopic` SNS topic fires on composite ALARM and OK. Subscribe an email in the
-console; no subscription is pre-created because it would need confirmation.
+**There is no SNS topic.** One used to be wired to the composite alarm, but nothing was ever
+subscribed to it, so it published into the void on every experiment while adding two security
+findings to justify. Failover never depended on it — that path is composite alarm → EventBridge →
+`TrafficShiftHandler`.
+
+To get notified, create a topic, subscribe to it, then add `AlarmActions` and `OKActions` to
+`CompositeAlarm`. If you do, encrypt it with a **customer-managed** KMS key whose policy grants
+`cloudwatch.amazonaws.com` `kms:Decrypt` and `kms:GenerateDataKey*`. The default `alias/aws/sns`
+key silently blocks CloudWatch from publishing and its policy cannot be edited — see
+[SECURITY-FINDINGS.md](SECURITY-FINDINGS.md).
 
 ---
 
@@ -705,6 +727,7 @@ Lex GR enabled, the replica bot is removed when the primary bot is deleted.
 | `docs/` | Architecture diagram and its `awsdac` source |
 | `RUNBOOK.md` | The test procedure |
 | `FIXES.md` | Every defect found against a real ACGR instance, and what is deliberately not a bug |
+| `SECURITY-FINDINGS.md` | Disposition and justification for all 54 static-analysis findings, plus production hardening |
 
 ```bash
 make help                          # list every target

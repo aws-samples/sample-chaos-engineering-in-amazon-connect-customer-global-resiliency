@@ -1,8 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: |
-  Amazon Connect FIS Chaos Engineering — ACGR Failover (StackSet-Ready)
+  Amazon Connect FIS Chaos Engineering - ACGR Failover (StackSet-Ready).
   Deploy via StackSet to both primary and paired regions.
   Uses IsPrimaryRegion condition to control region-specific resources.
+
+  NON-PRODUCTION SAMPLE - DEPLOY INTO A DEDICATED AWS ACCOUNT.
+  The FIS execution role can create, modify, delete and re-associate network ACLs on ANY
+  VPC in the account this is deployed into, not only the VPC created here, because FIS
+  creates the cloned ACL at run time and no ARN can be scoped in advance. A mis-targeted
+  experiment can therefore sever connectivity for unrelated workloads in the same account.
+  The blast radius is the account, so the account is the isolation boundary.
+  Before any production use, complete the hardening steps in SECURITY-FINDINGS.md.
 
 # ═══════════════════════════════════════════════════════════════
 # PARAMETERS
@@ -502,6 +510,13 @@ Resources:
   # "There is no additional charge for using gateway endpoints" - AWS VPC PrivateLink docs.
   ChaosVpc:
     Type: AWS::EC2::VPC
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W60
+            reason: >-
+              Flow logs omitted for a sample. There is no NAT or internet gateway, so there is
+              no egress path to observe. Recommended for production. See SECURITY-FINDINGS.md.
     Condition: MakeVpc
     Properties:
       CidrBlock: !Ref VpcCidr
@@ -587,6 +602,16 @@ Resources:
   # default allow-all egress rule, which the gateway endpoints then scope to DDB and S3.
   ChaosLambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F1000
+            reason: >-
+              Accepted for this sample, not overlooked. The subnets are private with no NAT and
+              no internet gateway, so egress has no route off the VPC and the DynamoDB and S3
+              gateway endpoints are the only reachable destinations. An explicit egress rule
+              scoped to those prefix lists is listed as production hardening in
+              SECURITY-FINDINGS.md.
     Condition: MakeVpc
     Properties:
       GroupDescription: Egress-only SG for the Connect chaos Lambdas (DynamoDB + S3 via gateway endpoints)
@@ -655,6 +680,30 @@ Resources:
   # characters long".
   FISConfigBucket:
     Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: >-
+              Access logging omitted on purpose. This bucket holds only short-lived FIS fault
+              configuration written and read by AWS services, contains no customer data, and a
+              log target bucket would itself be flagged. Recommended for production. See
+              SECURITY-FINDINGS.md.
+          - id: W51
+            reason: >-
+              No bucket policy needed. All public access is blocked at the bucket level and
+              access is already restricted by IAM on the FIS and Lambda execution roles, which
+              are the only principals. See SECURITY-FINDINGS.md.
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: >-
+              See cfn_nag W35.
+          - id: CKV_AWS_21
+            comment: >-
+              Versioning omitted deliberately: it breaks the documented cleanup, because "aws s3
+              rm --recursive" leaves non-current versions and CloudFormation cannot delete a
+              bucket that still holds versions. See SECURITY-FINDINGS.md.
     Properties:
       BucketName: !Sub 'ccfis-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}'
       BucketEncryption:
@@ -670,6 +719,19 @@ Resources:
   # ── IAM ──
   LexBotRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
+          - id: W11
+            reason: >-
+              Scoped as far as the APIs allow. See SECURITY-FINDINGS.md for the per-action
+              justification and the planned reduction for the FIS network policy.
     Properties:
       RoleName: !Sub 'ConnectChaos-LexBot-${AWS::Region}'
       AssumeRolePolicyDocument:
@@ -690,6 +752,15 @@ Resources:
 
   LexFulfillmentRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
     Properties:
       RoleName: !Sub 'ConnectChaos-LexFulfillment-${AWS::Region}'
       AssumeRolePolicyDocument:
@@ -731,6 +802,15 @@ Resources:
   # tables — it only appends call records.
   CallLoggerRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
     Properties:
       RoleName: !Sub 'ConnectChaos-CallLogger-${AWS::Region}'
       AssumeRolePolicyDocument:
@@ -757,6 +837,15 @@ Resources:
   # chaos config, so an Experiment 1 fault cannot have side effects on the other experiments.
   AccountLookupRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
     Properties:
       RoleName: !Sub 'ConnectChaos-AccountLookup-${AWS::Region}'
       AssumeRolePolicyDocument:
@@ -800,6 +889,25 @@ Resources:
 
   FISExecutionRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
+          - id: W11
+            reason: >-
+              Scoped as far as the APIs allow. See SECURITY-FINDINGS.md for the per-action
+              justification and the planned reduction for the FIS network policy.
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: >-
+              The FIS network policy needs verbs on NACLs that FIS creates at runtime, so no ARN
+              is known in advance. Reduction plan in SECURITY-FINDINGS.md.
     Properties:
       RoleName: !Sub 'ConnectChaos-FIS-${AWS::Region}'
       AssumeRolePolicyDocument:
@@ -859,6 +967,19 @@ Resources:
 
   TrafficShiftRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
+          - id: W11
+            reason: >-
+              Scoped as far as the APIs allow. See SECURITY-FINDINGS.md for the per-action
+              justification and the planned reduction for the FIS network policy.
     Condition: DeployAutoFailover
     Properties:
       RoleName: !Sub 'ConnectChaos-TrafficShift-${AWS::Region}'
@@ -1014,6 +1135,23 @@ Resources:
   # ── Lambda ──
   LexFulfillmentHandler:
     Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W92
+            reason: >-
+              Reserved concurrency is deliberately unset. This is a synchronous voice IVR path,
+              so a concurrency cap would throttle live calls and drop them. Capacity is bounded
+              by inbound telephony instead. See SECURITY-FINDINGS.md.
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: >-
+              See cfn_nag W28/W92 reasoning: a concurrency cap would throttle a live voice path.
+          - id: CKV_AWS_173
+            comment: >-
+              Environment variables hold table names, Region names, ARNs and thresholds only. No
+              secret is present, so a CMK adds key management with nothing to protect.
     Properties:
       FunctionName: LexFulfillmentHandler
       # Note: python3.12 reaches Lambda EoL in late 2027. Bump to the latest supported
@@ -1095,6 +1233,23 @@ Resources:
   # ARN in the replicated paired-region flow.
   CallLoggerHandler:
     Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W92
+            reason: >-
+              Reserved concurrency is deliberately unset. This is a synchronous voice IVR path,
+              so a concurrency cap would throttle live calls and drop them. Capacity is bounded
+              by inbound telephony instead. See SECURITY-FINDINGS.md.
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: >-
+              See cfn_nag W28/W92 reasoning: a concurrency cap would throttle a live voice path.
+          - id: CKV_AWS_173
+            comment: >-
+              Environment variables hold table names, Region names, ARNs and thresholds only. No
+              secret is present, so a CMK adds key management with nothing to protect.
     Properties:
       FunctionName: ConnectChaos-CallLogger
       Runtime: python3.13
@@ -1134,6 +1289,23 @@ Resources:
   # $.AwsRegion Lambda ARN valid (ACGR requirement). Do not let CloudFormation auto-name it.
   AccountLookupHandler:
     Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W92
+            reason: >-
+              Reserved concurrency is deliberately unset. This is a synchronous voice IVR path,
+              so a concurrency cap would throttle live calls and drop them. Capacity is bounded
+              by inbound telephony instead. See SECURITY-FINDINGS.md.
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: >-
+              See cfn_nag W28/W92 reasoning: a concurrency cap would throttle a live voice path.
+          - id: CKV_AWS_173
+            comment: >-
+              Environment variables hold table names, Region names, ARNs and thresholds only. No
+              secret is present, so a CMK adds key management with nothing to protect.
     Properties:
       FunctionName: ConnectChaos-AccountLookup
       Runtime: python3.13
@@ -1217,6 +1389,19 @@ Resources:
 
   TrafficShiftHandler:
     Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W92
+            reason: >-
+              Reserved concurrency is deliberately unset. This is a synchronous voice IVR path,
+              so a concurrency cap would throttle live calls and drop them. Capacity is bounded
+              by inbound telephony instead. See SECURITY-FINDINGS.md.
+          - id: W89
+            reason: >-
+              Deliberately outside the VPC. This function calls only Connect and CloudWatch
+              APIs; placing it in the VPC would require paid interface endpoints for no benefit
+              and no change in exposure. See SECURITY-FINDINGS.md.
     Condition: DeployAutoFailover
     Properties:
       FunctionName: ConnectChaos-TrafficShiftHandler
@@ -1244,6 +1429,15 @@ Resources:
   # ── CloudWatch Alarms ──
   AlarmExp1Lambda:
     Type: AWS::CloudWatch::Alarm
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
     Properties:
       AlarmName: !Sub 'ConnectChaos-Exp1-Lambda-${AWS::Region}'
       AlarmDescription: >-
@@ -1269,6 +1463,15 @@ Resources:
 
   AlarmExp2DynamoDB:
     Type: AWS::CloudWatch::Alarm
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
     Properties:
       AlarmName: !Sub 'ConnectChaos-Exp2-DynamoDB-${AWS::Region}'
       AlarmDescription: >-
@@ -1294,6 +1497,15 @@ Resources:
 
   AlarmExp3Latency:
     Type: AWS::CloudWatch::Alarm
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
     Properties:
       AlarmName: !Sub 'ConnectChaos-Exp3-Latency-${AWS::Region}'
       AlarmDescription: 'Exp 3: Lex fulfillment code-hook latency (FIS invocation-add-delay)'
@@ -1313,6 +1525,15 @@ Resources:
 
   AlarmExp4Queue:
     Type: AWS::CloudWatch::Alarm
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
     Properties:
       AlarmName: !Sub 'ConnectChaos-Exp4-Queue-${AWS::Region}'
       AlarmDescription: >-
@@ -1352,20 +1573,24 @@ Resources:
       AlarmName: !Sub 'ConnectChaos-Composite-${AWS::Region}'
       AlarmDescription: ANY component alarm triggers ACGR failover
       AlarmRule: !Sub 'ALARM("ConnectChaos-Exp1-Lambda-${AWS::Region}") OR ALARM("ConnectChaos-Exp2-DynamoDB-${AWS::Region}") OR ALARM("ConnectChaos-Exp3-Latency-${AWS::Region}") OR ALARM("ConnectChaos-Exp4-Queue-${AWS::Region}")'
+      # ActionsEnabled stays true: the state change this alarm publishes is what the
+      # EventBridge rule below matches on. That is the failover path, and it does not
+      # need an alarm action of its own.
       ActionsEnabled: true
-      AlarmActions:
-        - !Ref AlarmNotificationTopic
-      OKActions:
-        - !Ref AlarmNotificationTopic
 
-  # SNS topic for human-in-the-loop alerts on composite alarm state changes.
-  # Subscribers are added by the operator via the AWS Console after deploy
-  # (we don't pre-subscribe an email because emails would need confirmation).
-  AlarmNotificationTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub 'ConnectChaos-AlarmNotifications-${AWS::Region}'
-      DisplayName: ConnectChaos alarm notifications
+  # NOTE: there is deliberately no SNS topic here. An AlarmNotificationTopic used to be
+  # wired to AlarmActions/OKActions, but nothing was ever subscribed to it, so it published
+  # into the void on every experiment while adding two security findings that had to be
+  # justified. Failover never depended on it - that runs CompositeAlarm -> EventBridge ->
+  # TrafficShiftHandler, which is unaffected.
+  #
+  # To get notified, create a topic and subscribe to it yourself, then add:
+  #     AlarmActions: [!Ref YourTopic]
+  #     OKActions:    [!Ref YourTopic]
+  # If you do, encrypt it with a CUSTOMER-MANAGED KMS key whose policy grants
+  # cloudwatch.amazonaws.com kms:Decrypt and kms:GenerateDataKey*. The default
+  # alias/aws/sns key silently blocks CloudWatch from publishing, and its policy cannot
+  # be edited. See SECURITY-FINDINGS.md.
 
   # ── FIS Experiment Templates ──
   FISExperimentLambdaFailure:
@@ -1516,6 +1741,19 @@ Resources:
 
   TrafficGeneratorRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: >-
+              Fixed names are required, not incidental. ACGR mandates identical Lambda function
+              names in both Regions, and the runbook, Makefile and make verify all address these
+              roles and alarms by name. Generated names would break failover and every
+              operational check. See SECURITY-FINDINGS.md.
+          - id: W11
+            reason: >-
+              Scoped as far as the APIs allow. See SECURITY-FINDINGS.md for the per-action
+              justification and the planned reduction for the FIS network policy.
     Condition: DeployTrafficGenerator
     Properties:
       RoleName: !Sub 'ConnectChaos-TrafficGenerator-${AWS::Region}'
@@ -1545,6 +1783,19 @@ Resources:
 
   TrafficGeneratorFunction:
     Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W92
+            reason: >-
+              Reserved concurrency is deliberately unset. This is a synchronous voice IVR path,
+              so a concurrency cap would throttle live calls and drop them. Capacity is bounded
+              by inbound telephony instead. See SECURITY-FINDINGS.md.
+          - id: W89
+            reason: >-
+              Deliberately outside the VPC. This function calls only Connect and CloudWatch
+              APIs; placing it in the VPC would require paid interface endpoints for no benefit
+              and no change in exposure. See SECURITY-FINDINGS.md.
     Condition: DeployTrafficGenerator
     Properties:
       FunctionName: !Sub 'ConnectChaos-TrafficGenerator-${AWS::Region}'

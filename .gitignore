@@ -55,3 +55,6 @@ cdk.out/
 .mx.txt
 .tdgnum.json
 .testflow2.json
+# Security scan exports - findings reports are not source, and may name real resources.
+SecurityFindings/
+*.csv

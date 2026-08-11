@@ -115,7 +115,10 @@ ALLOWED_LITERALS: dict[str, str] = {
 
 # Binary or generated files with nothing to review.
 SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".pyc", ".ico")
-SKIP_DIRS = {".git", "__pycache__", "build", "node_modules", ".venv", "venv"}
+# SecurityFindings holds scanner exports. They are gitignored, so they can never be committed,
+# and they legitimately quote resource names from a real deployment. Scanning them would block
+# `make lint` on a file that is not part of the source tree.
+SKIP_DIRS = {".git", "__pycache__", "build", "node_modules", ".venv", "venv", "SecurityFindings"}
 
 # This file necessarily contains the patterns and the exemption list.
 SELF = os.path.normpath("scripts/scan-secrets.py")
