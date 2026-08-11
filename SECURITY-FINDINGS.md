@@ -28,12 +28,17 @@ reason, a verified false positive, or an open recommendation that is still outst
 | Disposition | Rules | Findings |
 |---|:-:|:-:|
 | [Resolved by removing the resource](#resolved-by-removal) | 2 | 2 |
-| [Suppressed — deliberate design decision](#suppressed--deliberate-design-decisions) | 13 | 35 |
+| [Suppressed — deliberate design decision](#suppressed--deliberate-design-decisions) | 15 | 41 |
 | [No action — verified false positive](#no-action--verified-false-positives) | 6 | 11 |
-| [OPEN — recommended, not yet done](#open--recommended-and-not-yet-done) | 2 | 6 |
 | **Total** | **23** | **54** |
 
-Severity as reported: 1 ERROR, 47 WARNING, 6 INFO.
+Severity as reported: 1 ERROR, 47 WARNING, 6 INFO. **Zero findings are unaddressed.**
+
+Six of the suppressed findings — `CKV_AWS_116` (Dead Letter Queue) and `CKV_AWS_165` (DynamoDB
+point-in-time recovery) — are accepted **only because this is a demonstration sample**. They are
+marked `REQUIRED for production` in both their suppression reasons and the
+[hardening table](#production-hardening). They are not defects in a sample; they are gaps in
+anything real.
 
 Suppressions are recorded as `Metadata.cfn_nag.rules_to_suppress` and `Metadata.checkov.skip` on
 the affected resource, so the reason sits next to the code and the scanner stops reporting it. A
@@ -208,48 +213,95 @@ accurate — `git` is resolved from `PATH` — and accepted for a developer-run 
 
 ---
 
-## OPEN — recommended and not yet done
+### `CKV_AWS_116` — no Dead Letter Queue (×3) — sample scope only
 
-These are **not** suppressed. They are genuine gaps and they remain open.
+**Accepted for this sample. Required for production.**
 
-### `CKV_AWS_116` — no Dead Letter Queue on the Lambdas (×3)
+Two invocation paths, and they differ:
 
-**The most important finding in this report, and it is a reliability gap rather than a security
-one.**
+- **Synchronous** — the three Lambdas the contact flows invoke. A DLQ has no meaning here: the
+  caller is on the line experiencing the failure, and the flow's Error branch is the handling. A
+  queued retry minutes later is worthless.
+- **Asynchronous** — EventBridge → `TrafficShiftHandler`, and this is the one that matters. With
+  no DLQ on the rule target and no on-failure destination, a repeatedly failing invoke would
+  eventually drop the failover event **with nothing recording it.** A real impairment would not
+  fail over, and every alarm and dashboard would still read correct. Same silent-failure class as
+  `FIXES.md` Fix 21.
 
-`TrafficShiftHandler` is invoked by EventBridge when the composite alarm fires. There is no DLQ on
-the rule target and no on-failure destination on the function. If that invocation kept failing,
-the failover event would eventually be dropped **with nothing recording it** — a real regional
-impairment would not fail over, and every alarm and dashboard would still look correct.
+Tolerable here for one reason only: every experiment is **operator-initiated and verified against
+the runbook**, so a lost event shows up immediately as "traffic did not shift" and is recovered by
+re-running the experiment. That property does not exist in production, where the trigger is a real
+outage and nobody is watching.
 
-That is the same silent-failure class as `FIXES.md` Fix 21, which this project has already been
-bitten by. Recommended: an SQS DLQ on the EventBridge rule target, plus an alarm on its depth.
+Production requires an SQS DLQ on the EventBridge rule target plus an alarm on its depth. See
+[hardening item 3](#production-hardening).
 
-### `CKV_AWS_165` — DynamoDB point-in-time recovery disabled (×3)
+### `CKV_AWS_165` — DynamoDB point-in-time recovery disabled (×3) — sample scope only
 
-PITR gives continuous backups with restore to any second in the last 35 days. These tables hold
-one seed customer record, a chaos flag and a call log, all recreated by `make post-deploy` in
-seconds, so the data value is near zero. It is one property per table at negligible cost and
-should simply be enabled.
+**Accepted for this sample. Required for production.**
+
+PITR gives continuous backups with restore to any second in the last 35 days. These three tables
+hold one seed customer record, a Region-scoped chaos flag and a call-audit log — demo fixtures,
+recreated by `make post-deploy` in seconds. There is no production or customer data, so PITR would
+protect nothing that is not trivially regenerated.
+
+The moment this template carries real contact data, that reasoning stops applying. See
+[hardening item 4](#production-hardening).
+
+---
+
+## Production disclaimer
+
+**This repository is a demonstration sample. It has not been assessed for production use, and it
+is not cleared for it.**
+
+Every suppression in this template was justified **against the threat model of a sample running in
+a dedicated non-production account**: short-lived demo data, no real customers, an operator present
+for every experiment, and a bounded, self-reverting fault. Those assumptions are what make the
+reasoning valid. None of them hold in production.
+
+Specifically, the following are accepted here *because* it is a sample and must be revisited before
+any production use:
+
+| Accepted for the sample | Why it does not carry over |
+|---|---|
+| Account-wide FIS NACL permissions (`W11`, `CKV_AWS_111`) | A production account contains workloads a mis-targeted experiment must not be able to reach |
+| Allow-all security-group egress (`F1000`) | Relies on there being no NAT and no internet gateway. Add one and the control disappears |
+| No Dead Letter Queue (`CKV_AWS_116`) | Relies on an operator watching each run. In production the trigger is a real outage and nobody is watching |
+| No DynamoDB PITR (`CKV_AWS_165`) | Relies on the data being regenerable demo fixtures |
+| No reserved concurrency (`W92`, `CKV_AWS_115`) | Untested against real call volume |
+| No flow logs, S3 access logging or versioning (`W60`, `W35`, `CKV_AWS_18`, `CKV_AWS_21`) | Forensics and auditability are not optional in production |
+
+**Production use requires additional verification beyond this document:** completing the hardening
+below, a security review against your own organisation's controls, and re-validating all four
+experiments on live telephony after the changes — because two of the hardening items alter the
+network path the faults depend on, and getting them wrong looks identical to a working system.
+
+Chaos engineering against a production contact centre additionally needs blast-radius planning,
+a rollback plan, and agreement from whoever owns the customer-facing service.
 
 ---
 
 ## Production hardening
 
-Complete these before deploying anywhere that matters. The first two change the network path the
+Complete these before deploying anywhere that matters. Items 1 and 2 change the network path the
 experiments depend on, so **each requires a redeploy and a live test call** — a wrong prefix list
 or too tight an IAM condition will cause the faults to silently stop arming, which looks exactly
 like a working system.
 
-| # | Change | Clears | Re-test required |
-|:-:|---|---|---|
-| 1 | Scope the FIS network policy to this stack's VPC and to FIS-managed NACLs | `W11`, `CKV_AWS_111` | Experiment 2, live call |
-| 2 | Add explicit `SecurityGroupEgress` limited to the DynamoDB and S3 gateway-endpoint prefix lists | `F1000` | Experiments 1–3, live call each |
-| 3 | Add the EventBridge DLQ and an alarm on its depth | `CKV_AWS_116` | Verify only |
-| 4 | Enable DynamoDB PITR on all three tables | `CKV_AWS_165` | Verify only |
-| 5 | Enable VPC flow logs | `W60` | Verify only |
-| 6 | Add S3 access logging and versioning, and update cleanup to delete object versions | `W35`, `W51`, `CKV_AWS_18`, `CKV_AWS_21` | Verify + a cleanup dry run |
-| 7 | Re-evaluate reserved concurrency against your real call volume | `W92`, `CKV_AWS_115` | Load test |
+| # | Change | Priority | Clears | Re-test required |
+|:-:|---|---|---|---|
+| 1 | Scope the FIS network policy to this stack's VPC and to FIS-managed NACLs | **Highest** | `W11`, `CKV_AWS_111` | Experiment 2, live call |
+| 2 | Add explicit `SecurityGroupEgress` limited to the DynamoDB and S3 gateway-endpoint prefix lists | High | `F1000` | Experiments 1–3, live call each |
+| 3 | Add an SQS DLQ on the EventBridge rule target, plus an alarm on its depth | High | `CKV_AWS_116` | Verify only |
+| 4 | Enable DynamoDB PITR on all three tables | Medium | `CKV_AWS_165` | Verify only |
+| 5 | Enable VPC flow logs | Medium | `W60` | Verify only |
+| 6 | Add S3 access logging and versioning, and update cleanup to delete object versions | Medium | `W35`, `W51`, `CKV_AWS_18`, `CKV_AWS_21` | Verify + a cleanup dry run |
+| 7 | Re-evaluate reserved concurrency against real call volume | Low | `W92`, `CKV_AWS_115` | Load test |
+| 8 | Encrypt Lambda environment variables with a CMK if you add any secret to them | Low | `CKV_AWS_173` | Verify only |
+
+Items 3 and 4 are the cheapest: both are additive, neither changes an existing code path, and both
+are verifiable without a phone call. If you only do two things from this table, do those.
 
 ### Plan for item 1 — scoping the FIS network policy
 
@@ -313,15 +365,21 @@ parses cleanly with `cfn-lint`. The suppressions themselves were **not** confirm
 cfn_nag or checkov run, because neither tool is installed in this workspace — the first pipeline
 run after this change should confirm the counts drop as expected:
 
-| Rule | Findings suppressed |
-|---|:-:|
-| `W28` | 11 |
-| `W92` | 5 |
-| `W11` | 4 |
-| `W89` | 2 |
-| `F1000`, `W35`, `W51`, `W60` | 1 each |
-| `CKV_AWS_115`, `CKV_AWS_173` | 3 each |
-| `CKV_AWS_18`, `CKV_AWS_21`, `CKV_AWS_111` | 1 each |
+| Scanner | Rule | Findings suppressed |
+|---|---|:-:|
+| cfn_nag | `W28` | 11 |
+| cfn_nag | `W92` | 5 |
+| cfn_nag | `W11` | 4 |
+| cfn_nag | `W89` | 2 |
+| cfn_nag | `F1000`, `W35`, `W51`, `W60` | 1 each |
+| checkov | `CKV_AWS_115`, `CKV_AWS_116`, `CKV_AWS_165`, `CKV_AWS_173` | 3 each |
+| checkov | `CKV_AWS_18`, `CKV_AWS_21`, `CKV_AWS_111` | 1 each |
+| | **Total** | **41** |
 
-Expected remaining: **`CKV_AWS_116` ×3 and `CKV_AWS_165` ×3**, the two open items, plus the bandit
-and semgrep informational findings, which have no suppression comments applied.
+Plus 2 resolved by deleting the SNS topic = **43 of 54**.
+
+Expected remaining after the next scan: the **11 bandit and semgrep informational findings**, which
+carry no suppression comments. They are analysed under
+[No action](#no-action--verified-false-positives) and left visible on purpose — each was verified
+against the code, and an unsuppressed INFO is more honest than a `# nosec` that stops anyone
+looking again.

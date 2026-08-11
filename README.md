@@ -20,9 +20,16 @@ where the call is still answered.
 > Every FIS experiment here carries a bounded duration and a stop condition on its own alarm, so
 > disruption is time-limited and self-reverting. That limits duration, not scope.
 >
-> **Before any production use**, work through
-> [SECURITY-FINDINGS.md → Production hardening](SECURITY-FINDINGS.md#production-hardening). That
-> file also records the disposition and justification for all 54 static-analysis findings.
+> **This sample is not cleared for production.** Several security findings are accepted
+> specifically because this is a demonstration in a throwaway account — no real customer data, an
+> operator present for every experiment, and faults that expire on their own. None of those
+> assumptions hold in production.
+>
+> Before any production use, work through
+> [SECURITY-FINDINGS.md](SECURITY-FINDINGS.md) — it carries the
+> [production disclaimer](SECURITY-FINDINGS.md#production-disclaimer), the
+> [hardening steps](SECURITY-FINDINGS.md#production-hardening), and the disposition and
+> justification for all 54 static-analysis findings.
 
 **This file explains what the sample is, how it works, and how to install it.**
 **[RUNBOOK.md](RUNBOOK.md) is the procedure for running the experiments** — every test command,

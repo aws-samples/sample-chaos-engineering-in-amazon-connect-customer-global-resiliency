@@ -337,6 +337,16 @@ Resources:
   # so nothing depends on the literal names.
   CustomerTable:
     Type: AWS::DynamoDB::GlobalTable
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_165
+            comment: >-
+              Accepted for this sample; REQUIRED for production. These tables hold one seed
+              customer record, a Region-scoped chaos flag and a call-audit log - all demo
+              fixtures recreated by 'make post-deploy' in seconds, with no production or
+              customer data. PITR would protect nothing that is not trivially regenerated. Any
+              real deployment must enable it. See SECURITY-FINDINGS.md.
     Condition: IsPrimaryRegion
     Properties:
       TableName: !Sub '${AWS::StackName}-Customers'
@@ -365,6 +375,16 @@ Resources:
   # writes one item per inbound contact from the very first block of the flow.
   CallLogTable:
     Type: AWS::DynamoDB::GlobalTable
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_165
+            comment: >-
+              Accepted for this sample; REQUIRED for production. These tables hold one seed
+              customer record, a Region-scoped chaos flag and a call-audit log - all demo
+              fixtures recreated by 'make post-deploy' in seconds, with no production or
+              customer data. PITR would protect nothing that is not trivially regenerated. Any
+              real deployment must enable it. See SECURITY-FINDINGS.md.
     Condition: IsPrimaryRegion
     Properties:
       TableName: !Sub '${AWS::StackName}-CallLog'
@@ -392,6 +412,16 @@ Resources:
 
   ChaosConfigTable:
     Type: AWS::DynamoDB::GlobalTable
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_165
+            comment: >-
+              Accepted for this sample; REQUIRED for production. These tables hold one seed
+              customer record, a Region-scoped chaos flag and a call-audit log - all demo
+              fixtures recreated by 'make post-deploy' in seconds, with no production or
+              customer data. PITR would protect nothing that is not trivially regenerated. Any
+              real deployment must enable it. See SECURITY-FINDINGS.md.
     Condition: IsPrimaryRegion
     Properties:
       TableName: !Sub '${AWS::StackName}-Config'
@@ -698,7 +728,11 @@ Resources:
         skip:
           - id: CKV_AWS_18
             comment: >-
-              See cfn_nag W35.
+              This bucket holds only short-lived FIS fault configuration written by FIS and read
+              by the Lambda extension. No customer data. Encryption at rest, all four public
+              access blocks, and IAM-only access are already in place; a log target bucket would
+              itself be flagged for the same rule. Recommended for production. See
+              SECURITY-FINDINGS.md.
           - id: CKV_AWS_21
             comment: >-
               Versioning omitted deliberately: it breaks the documented cleanup, because "aws s3
@@ -1147,11 +1181,25 @@ Resources:
         skip:
           - id: CKV_AWS_115
             comment: >-
-              See cfn_nag W28/W92 reasoning: a concurrency cap would throttle a live voice path.
+              Reserved concurrency is deliberately unset. This is a synchronous voice IVR path, so
+              a cap would throttle and drop live calls rather than queue them, and reserving
+              capacity would also subtract from the account's unreserved pool. See
+              SECURITY-FINDINGS.md.
           - id: CKV_AWS_173
             comment: >-
               Environment variables hold table names, Region names, ARNs and thresholds only. No
               secret is present, so a CMK adds key management with nothing to protect.
+          - id: CKV_AWS_116
+            comment: >-
+              Accepted for this sample; REQUIRED for production. These functions are invoked
+              synchronously by a contact flow, where the caller experiences the failure directly
+              and a queued retry has no value. The asynchronous path that does matter is
+              EventBridge -> TrafficShiftHandler: without a DLQ a repeatedly failing invoke
+              would eventually drop the failover event with nothing recording it. That is
+              tolerable here only because every experiment is operator-initiated and verified
+              against the runbook, so a lost event is recovered by re-running it. In production
+              nobody is watching, so add a DLQ on the EventBridge rule target plus an alarm on
+              its depth. See SECURITY-FINDINGS.md.
     Properties:
       FunctionName: LexFulfillmentHandler
       # Note: python3.12 reaches Lambda EoL in late 2027. Bump to the latest supported
@@ -1245,11 +1293,25 @@ Resources:
         skip:
           - id: CKV_AWS_115
             comment: >-
-              See cfn_nag W28/W92 reasoning: a concurrency cap would throttle a live voice path.
+              Reserved concurrency is deliberately unset. This is a synchronous voice IVR path, so
+              a cap would throttle and drop live calls rather than queue them, and reserving
+              capacity would also subtract from the account's unreserved pool. See
+              SECURITY-FINDINGS.md.
           - id: CKV_AWS_173
             comment: >-
               Environment variables hold table names, Region names, ARNs and thresholds only. No
               secret is present, so a CMK adds key management with nothing to protect.
+          - id: CKV_AWS_116
+            comment: >-
+              Accepted for this sample; REQUIRED for production. These functions are invoked
+              synchronously by a contact flow, where the caller experiences the failure directly
+              and a queued retry has no value. The asynchronous path that does matter is
+              EventBridge -> TrafficShiftHandler: without a DLQ a repeatedly failing invoke
+              would eventually drop the failover event with nothing recording it. That is
+              tolerable here only because every experiment is operator-initiated and verified
+              against the runbook, so a lost event is recovered by re-running it. In production
+              nobody is watching, so add a DLQ on the EventBridge rule target plus an alarm on
+              its depth. See SECURITY-FINDINGS.md.
     Properties:
       FunctionName: ConnectChaos-CallLogger
       Runtime: python3.13
@@ -1301,11 +1363,25 @@ Resources:
         skip:
           - id: CKV_AWS_115
             comment: >-
-              See cfn_nag W28/W92 reasoning: a concurrency cap would throttle a live voice path.
+              Reserved concurrency is deliberately unset. This is a synchronous voice IVR path, so
+              a cap would throttle and drop live calls rather than queue them, and reserving
+              capacity would also subtract from the account's unreserved pool. See
+              SECURITY-FINDINGS.md.
           - id: CKV_AWS_173
             comment: >-
               Environment variables hold table names, Region names, ARNs and thresholds only. No
               secret is present, so a CMK adds key management with nothing to protect.
+          - id: CKV_AWS_116
+            comment: >-
+              Accepted for this sample; REQUIRED for production. These functions are invoked
+              synchronously by a contact flow, where the caller experiences the failure directly
+              and a queued retry has no value. The asynchronous path that does matter is
+              EventBridge -> TrafficShiftHandler: without a DLQ a repeatedly failing invoke
+              would eventually drop the failover event with nothing recording it. That is
+              tolerable here only because every experiment is operator-initiated and verified
+              against the runbook, so a lost event is recovered by re-running it. In production
+              nobody is watching, so add a DLQ on the EventBridge rule target plus an alarm on
+              its depth. See SECURITY-FINDINGS.md.
     Properties:
       FunctionName: ConnectChaos-AccountLookup
       Runtime: python3.13
