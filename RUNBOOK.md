@@ -80,6 +80,7 @@ on every redeploy, so pasting them is how a test run ends up pointing at a templ
 exists:
 
 ```bash
+# Helper: read a named output from the stack. Args: <region> <OutputKey>
 get_out () { aws cloudformation describe-stacks --stack-name $STACK --region "$1" \
   --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text; }
 
@@ -93,6 +94,8 @@ export GEN=ConnectChaos-TrafficGenerator-$PRIMARY_REGION
 lookup came back empty, which is cheaper than discovering it three commands into an experiment:
 
 ```bash
+# Refuse to continue if an example value survived, a variable is empty, or the FIS
+# template lookup came back with something that is not a template id.
 ok=1
 case "$INSTANCE_ID$TDG_ID$PHONE" in
   *EXAMPLE*|*555-0100*) echo "FAIL  replace the three example values in Step 0"; ok=0 ;;
@@ -146,6 +149,8 @@ primary at 100%. If the split is not 100/0, run [Step R](#step-r--reset-between-
 ## Step 2 — confirm the environment
 
 ```bash
+# Confirms both stacks, Lex bot AND alias replication, the $.AwsRegion tokens in all five
+# flows, seed data, the traffic split, the alarms, and smoke-invokes the shift handler.
 make verify STACK=$STACK PRIMARY_REGION=$PRIMARY_REGION \
   PAIRED_REGION=$PAIRED_REGION TDG_ID=$TDG_ID
 ```
@@ -162,6 +167,8 @@ Then confirm every alarm is clear, in **both** Regions. FIS refuses to start an 
 stop-condition alarm is not already `OK`:
 
 ```bash
+# Component alarms, then the composite, for BOTH Regions. FIS refuses to start an
+# experiment whose stop-condition alarm is not already OK, so all of these must be clear.
 for R in $PRIMARY_REGION $PAIRED_REGION; do
   echo "── $R"
   aws cloudwatch describe-alarms --region "$R" --alarm-name-prefix ConnectChaos- \
@@ -194,6 +201,8 @@ Every row must read `OK` or `INSUFFICIENT_DATA`. Open the dashboard now so you c
 Then confirm the **primary** Region served it:
 
 ```bash
+# Both should show the invocation. This is also the only proof that a VPC-attached Lambda
+# can write CloudWatch Logs through DynamoDB and S3 gateway endpoints alone (no NAT).
 aws logs tail /aws/lambda/ConnectChaos-AccountLookup --region $PRIMARY_REGION --since 5m
 aws logs tail /aws/lambda/ConnectChaos-CallLogger    --region $PRIMARY_REGION --since 5m
 ```
@@ -238,6 +247,8 @@ Two consequences of the dwell ([why it exists](README.md#why-failover-is-deliber
 ## Step R — reset between every experiment
 
 ```bash
+# Stops running experiments in both Regions, restores 100% primary / 0% paired, disarms the
+# Exp 4 flag in both Regions, then waits for every alarm to leave ALARM. Must exit 0.
 make reset STACK=$STACK PRIMARY_REGION=$PRIMARY_REGION \
            PAIRED_REGION=$PAIRED_REGION TDG_ID=$TDG_ID
 ```
@@ -292,6 +303,8 @@ done
 **1. Start the fault.**
 
 ```bash
+# Errors every ConnectChaos-AccountLookup invocation without running the code.
+# Stop condition is this experiment's OWN alarm, so FIS halts it as soon as it is detected.
 aws fis start-experiment --experiment-template-id $EXP1 --region $PRIMARY_REGION \
   --query "experiment.{id:id,state:state.status}"
 ```
@@ -352,6 +365,8 @@ and the fault stays applied for the whole run.
 **1. Start the fault.**
 
 ```bash
+# Blocks both Lambda subnets from the DynamoDB endpoint at the NACL. Network-level, so it
+# takes effect immediately and stays applied for the whole experiment.
 aws fis start-experiment --experiment-template-id $EXP2 --region $PRIMARY_REGION \
   --query "experiment.{id:id,state:state.status}"
 ```
@@ -406,6 +421,8 @@ Maximum on `LexFulfillmentHandler`
 **1. Start the fault.**
 
 ```bash
+# Injects a ~31 s startup delay into LexFulfillmentHandler, whose own timeout is 40 s -- so
+# the code hook runs slow but still returns cleanly, which is why Errors stays 0.
 aws fis start-experiment --experiment-template-id $EXP3 --region $PRIMARY_REGION \
   --query "experiment.{id:id,state:state.status}"
 ```
@@ -423,6 +440,7 @@ aws fis start-experiment --experiment-template-id $EXP3 --region $PRIMARY_REGION
 **4. Verify.**
 
 ```bash
+# a) the latency alarm
 aws cloudwatch describe-alarms --alarm-names ConnectChaos-Exp3-Latency-$PRIMARY_REGION \
   --region $PRIMARY_REGION --query "MetricAlarms[0].StateValue" --output text
 
@@ -460,6 +478,8 @@ Not a FIS experiment: you set a DynamoDB flag. **It does not expire — you must
 **1. Arm the flag — in the PRIMARY Region only.**
 
 ```bash
+# Arm the flag in the PRIMARY Region only. The key is Region-scoped because the table is a
+# Global Table -- arming both Regions replicates the fault and failover could never recover.
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag#'$PRIMARY_REGION'"},"enabled":{"BOOL":true}}'
 ```
@@ -484,6 +504,7 @@ total call is roughly two and a half minutes.
 **3. Turn the flag off. It does not expire.**
 
 ```bash
+# Disarm. Unlike a FIS experiment this has no duration and will NOT expire on its own.
 aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
   --item '{"config_key":{"S":"chaos_flag#'$PRIMARY_REGION'"},"enabled":{"BOOL":false}}'
 ```
@@ -491,6 +512,7 @@ aws dynamodb put-item --table-name $STACK-Config --region $PRIMARY_REGION \
 **4. Verify.**
 
 ```bash
+# a) the queue-wait alarm
 aws cloudwatch describe-alarms --alarm-names ConnectChaos-Exp4-Queue-$PRIMARY_REGION \
   --region $PRIMARY_REGION --query "MetricAlarms[0].StateValue" --output text
 
@@ -551,6 +573,7 @@ explicitly, independently of any experiment.
 **1. Shift traffic by hand.**
 
 ```bash
+# Shift by hand, so this proof does not depend on an experiment having fired.
 aws connect update-traffic-distribution --id $TDG_ID --region $PRIMARY_REGION \
   --telephony-config "{\"Distributions\":[{\"Region\":\"$PRIMARY_REGION\",\"Percentage\":0},{\"Region\":\"$PAIRED_REGION\",\"Percentage\":100}]}"
 ```

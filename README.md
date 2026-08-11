@@ -425,6 +425,8 @@ export PAIRED_INSTANCE_ARN=arn:aws:connect:$PAIRED_REGION:$ACCT:instance/$INSTAN
 ### Step 2 — deploy both Regions
 
 ```bash
+# Creates the code bucket, zips and uploads the Lambdas, deploys the primary Region,
+# reads the Lex GR bot/alias ids from its outputs, then deploys the paired Region.
 make deploy-pair STACK=$STACK \
   PRIMARY_REGION=$PRIMARY_REGION PAIRED_REGION=$PAIRED_REGION \
   PRIMARY_INSTANCE_ARN=$PRIMARY_INSTANCE_ARN \
@@ -443,6 +445,7 @@ Lambdas, and that is the single most important thing this sample proves.
 <summary>Deploying one Region at a time</summary>
 
 ```bash
+# Deploy ONE Region. Run it again for the paired Region, adding the replicated Lex ids.
 make deploy STACK=$STACK REGION=$PRIMARY_REGION \
   CONNECT_INSTANCE_ARN=$PRIMARY_INSTANCE_ARN \
   CONNECT_INSTANCE_ID=$INSTANCE_ID TDG_ID=$TDG_ID
@@ -459,6 +462,8 @@ the paired flow at its own bot.
 ### Step 3 — the three things CloudFormation cannot do
 
 ```bash
+# The three steps CloudFormation cannot do: seed the tables, associate the phone number
+# with ConnectChaos-Menu, and reset traffic to 100% primary. Idempotent, safe to re-run.
 make post-deploy STACK=$STACK \
   PRIMARY_REGION=$PRIMARY_REGION PAIRED_REGION=$PAIRED_REGION \
   INSTANCE_ID=$INSTANCE_ID TDG_ID=$TDG_ID
@@ -480,6 +485,7 @@ make post-deploy STACK=$STACK \
 ### Step 4 — verify before spending any phone calls
 
 ```bash
+# 29 checks across both Regions. Must exit 0 before you place a single test call.
 make verify STACK=$STACK PRIMARY_REGION=$PRIMARY_REGION \
   PAIRED_REGION=$PAIRED_REGION TDG_ID=$TDG_ID
 ```
@@ -732,6 +738,7 @@ The runbook is written so you never need to paste these values: IDs come from `d
 outputs and shell variables at run time. Scan staged changes before committing with:
 
 ```bash
+# Scan only what is about to be committed, rather than the whole tree.
 python3 scripts/scan-secrets.py --staged
 ```
 
