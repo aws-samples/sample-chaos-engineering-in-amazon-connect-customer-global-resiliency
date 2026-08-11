@@ -684,6 +684,7 @@ Lex GR enabled, the replica bot is removed when the primary bot is deleted.
 | `lambda/*.py` | Function source; zipped and uploaded by `make`. Source of truth for the code |
 | `contact-flows/*.json` | **Generated** reference copies — not deployed. Live flows are inline in the template |
 | `scripts/extract-flows.py` | Regenerates the reference JSON and validates flow structure |
+| `scripts/scan-secrets.py` | Fails the build on any committed credential or deployment-specific identifier |
 | `scripts/wire-paired-flow.sh` | Post-deploy, **only** when `EnableLexGlobalResiliency=false` |
 | `docs/` | Architecture diagram and its `awsdac` source |
 | `RUNBOOK.md` | The test procedure |
@@ -701,8 +702,27 @@ make post-deploy STACK=... PRIMARY_REGION=... PAIRED_REGION=... INSTANCE_ID=... 
 make verify      STACK=... PRIMARY_REGION=... PAIRED_REGION=... TDG_ID=...
 make reset       STACK=... PRIMARY_REGION=... PAIRED_REGION=... TDG_ID=...   # see RUNBOOK Step R
 make flows                         # regenerate contact-flows/*.json from the template
-make lint                          # cfn-lint, bash -n, py_compile, JSON, flow drift
+make lint                          # cfn-lint, bash -n, py_compile, JSON, flow drift, secrets
 make clean
+```
+
+### No deployment-specific values in the repository
+
+`make lint` runs `scripts/scan-secrets.py`, which fails on AWS access keys, private keys,
+credential assignments, and any identifier tied to one deployment: account IDs, phone numbers,
+Connect instance / TDG / flow / queue / contact UUIDs, VPC and subnet IDs, FIS experiment
+template IDs, and Lex bot or alias IDs.
+
+Every check is a **pattern**, never a denylist of known values — a denylist would have to contain
+the very values it exists to keep out. Two AWS-owned public FIS layer accounts are allowlisted
+with a justification in `ALLOWED_LITERALS`; add to it only for values that are genuinely public,
+or append `scan-secrets: allow` to a single line.
+
+The runbook is written so you never need to paste these values: IDs come from `describe-stacks`
+outputs and shell variables at run time. Scan staged changes before committing with:
+
+```bash
+python3 scripts/scan-secrets.py --staged
 ```
 
 Run `make lint` before committing. There is no CI in this repo; validation is local. `-i W1030`

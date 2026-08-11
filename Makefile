@@ -503,6 +503,9 @@ lint:
 	# The reference flows are GENERATED from the template. Fail if they have drifted,
 	# rather than shipping reference files that contradict what is deployed.
 	python3 scripts/extract-flows.py --check
+	# This sample is published: fail if any deployment-specific identifier or
+	# credential has crept in. Pattern-based, so it needs no denylist of real values.
+	python3 scripts/scan-secrets.py
 
 # Regenerate the reference contact-flow JSONs from cfn/main-template.yaml.
 flows:

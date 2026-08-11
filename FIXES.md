@@ -562,15 +562,15 @@ a place where several unrelated defects can hide at once, all of them reporting 
 
 ## Fix 14 — `AWS::Lex::Bot` `Replication` did not leave a persistent GR replica
 
-**Symptom:** immediately after `make deploy-pair`, bot `QJ5VLLR4GH` was visible in the paired
+**Symptom:** immediately after `make deploy-pair`, bot `EXAMPLEBOT` was visible in the paired
 region via `list-bots` with status `Available`, and the paired stack's
 `AWS::Connect::IntegrationAssociation` (which references the replicated bot alias ARN)
 created successfully — so the replica demonstrably existed. Roughly forty minutes later the
 bot was **gone** from the paired region and the authoritative API reported no replica at all:
 
 ```
-$ aws lexv2-models list-bot-replicas --bot-id QJ5VLLR4GH --region us-east-1
-{ "botId": "QJ5VLLR4GH", "sourceRegion": "us-east-1", "botReplicaSummaries": [] }
+$ aws lexv2-models list-bot-replicas --bot-id EXAMPLEBOT --region us-east-1
+{ "botId": "EXAMPLEBOT", "sourceRegion": "us-east-1", "botReplicaSummaries": [] }
 ```
 
 This is the worst class of failure this sample can have: every stack resource reported
@@ -602,8 +602,8 @@ Note that the **bot** replica becoming `Enabled` is not sufficient. The bot **al
 is created separately and lags:
 
 ```
-IYOEXZUVAZ | Creating  | v0000000001     <- ~90 s
-IYOEXZUVAZ | Available | v0000000001
+EXAMPLEALS | Creating  | v0000000001     <- ~90 s
+EXAMPLEALS | Available | v0000000001
 ```
 
 The contact flow's `$.AwsRegion` Lex ARN resolves to the **alias**, so the paired region
@@ -631,9 +631,9 @@ passed: Connect → call-logger direct invoke → DynamoDB write → Lex → ful
 DynamoDB lookup → "Welcome back, John Doe".
 
 ```
-ContactId      2b4a4ac7-34ef-4b3e-b0dc-bfd1a07ec61e   Channel VOICE   INBOUND
-CallLogger     Logged contact ... (ANI=+447345750038, region=us-east-1)   511 ms
-Lex            ConnectChaosBot QJ5VLLR4GH  alias IYOEXZUVAZ  platform Connect
+ContactId      <contact-id>   Channel VOICE   INBOUND
+CallLogger     Logged contact ... (ANI=<caller-ani>, region=us-east-1)   511 ms
+Lex            ConnectChaosBot EXAMPLEBOT  alias EXAMPLEALS  platform Connect
 ASR            "one two three four five" -> interpretedValue "12345"  (confidence 1.0)
 Fulfillment    Intent LookupCustomer, Duration 300 ms, 0 errors
 ```
@@ -668,11 +668,11 @@ the stated cause is not.
 `list-metrics` after a real Connect voice call shows `StartConversation` unambiguously:
 
 ```
-metric=RuntimeConcurrency             Operation=StartConversation  InputMode=Speech  alias=IYOEXZUVAZ
-metric=RuntimeRequestCount            Operation=StartConversation  InputMode=None    alias=IYOEXZUVAZ
-metric=RuntimeRequestLength           Operation=StartConversation  InputMode=None    alias=IYOEXZUVAZ
-metric=RuntimeSucessfulRequestLatency Operation=StartConversation  InputMode=Speech  alias=IYOEXZUVAZ
-metric=RuntimeRequestCount            Operation=GetConnectAudioResponseMode          alias=IYOEXZUVAZ
+metric=RuntimeConcurrency             Operation=StartConversation  InputMode=Speech  alias=EXAMPLEALS
+metric=RuntimeRequestCount            Operation=StartConversation  InputMode=None    alias=EXAMPLEALS
+metric=RuntimeRequestLength           Operation=StartConversation  InputMode=None    alias=EXAMPLEALS
+metric=RuntimeSucessfulRequestLatency Operation=StartConversation  InputMode=Speech  alias=EXAMPLEALS
+metric=RuntimeRequestCount            Operation=GetConnectAudioResponseMode          alias=EXAMPLEALS
 ```
 
 So Connect **does** drive Lex through the streaming `StartConversation` operation, exactly as
@@ -833,7 +833,7 @@ region:
 
 ```
 us-west-2  contact 19:33:08Z
-us-west-2  CallLogger      "Logged contact 60e271fc... (ANI=+447345750038, region=us-west-2)"
+us-west-2  CallLogger      "Logged contact <contact-id> (ANI=<caller-ani>, region=us-west-2)"
 us-west-2  LexFulfillment  interpretedValue "12345"  intent LookupCustomer  0 errors
 us-east-1  0 contacts, 0 log events in BOTH function log groups
 ```
@@ -945,7 +945,7 @@ names overlap this sample's:
 
 ```
 12:20:30  CreateFunction  LexFulfillmentHandler, ConnectChaos-CallLogger   (us-west-2)
-12:30:16  DeleteBotReplica  QJ5VLLR4GH                                     (us-east-1)
+12:30:16  DeleteBotReplica  EXAMPLEBOT                                     (us-east-1)
 12:30:17  DeleteFunction    ConnectChaos-CallLogger                        (us-west-2)
 12:30:18  DeleteFunction    LexFulfillmentHandler                          (us-west-2)
 ```
