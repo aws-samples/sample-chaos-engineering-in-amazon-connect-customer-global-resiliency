@@ -26,10 +26,7 @@ where the call is still answered.
 > assumptions hold in production.
 >
 > Before any production use, work through
-> [SecurityFindings/SECURITY-FINDINGS.md](SecurityFindings/SECURITY-FINDINGS.md) — it carries the
-> [production disclaimer](SecurityFindings/SECURITY-FINDINGS.md#production-disclaimer), the
-> [hardening steps](SecurityFindings/SECURITY-FINDINGS.md#production-hardening), and the disposition and
-> justification for all 54 static-analysis findings.
+> [Security posture and production hardening](#security-posture-and-production-hardening) below.
 
 **This file explains what the sample is, how it works, and how to install it.**
 **[RUNBOOK.md](RUNBOOK.md) is the procedure for running the experiments** — every test command,
@@ -54,7 +51,7 @@ here, test from there.
 - [Monitoring](#monitoring)
 - [Synthetic traffic generator](#synthetic-traffic-generator-optional)
 - [Cost](#cost)
-- [Security](#security)
+- [Security posture and production hardening](#security-posture-and-production-hardening)
 - [Cleanup](#cleanup)
 - [Key design decisions](#key-design-decisions)
 - [Repository layout and tooling](#repository-layout-and-tooling)
@@ -604,8 +601,7 @@ findings to justify. Failover never depended on it — that path is composite al
 To get notified, create a topic, subscribe to it, then add `AlarmActions` and `OKActions` to
 `CompositeAlarm`. If you do, encrypt it with a **customer-managed** KMS key whose policy grants
 `cloudwatch.amazonaws.com` `kms:Decrypt` and `kms:GenerateDataKey*`. The default `alias/aws/sns`
-key silently blocks CloudWatch from publishing and its policy cannot be edited — see
-[SecurityFindings/SECURITY-FINDINGS.md](SecurityFindings/SECURITY-FINDINGS.md).
+key silently blocks CloudWatch from publishing and its policy cannot be edited.
 
 ---
 
@@ -657,18 +653,59 @@ $10–15/month per Region, mostly dashboards and alarms.
 
 ---
 
-## Security
+## Security posture and production hardening
 
-- **Sample only.** Do not run FIS experiments against a production contact centre without
-  blast-radius planning and a rollback plan.
-- Every FIS experiment has a **stop condition** bound to its own alarm, and an expiry.
+### Controls in place
+
+- Every FIS experiment has a **stop condition** bound to its own alarm and a bounded duration
+  (`FISExperimentDuration`, default `PT5M`), so any fault is time-limited and self-reverting.
 - The created VPC has **no internet gateway and no NAT** — only free gateway endpoints to
-  DynamoDB and S3.
-- The FIS config bucket blocks all public access; only the FIS and Lambda execution roles can
-  reach it.
-- IAM roles are least-privilege. Review them before deploying.
-- Experiment 4's chaos flag does **not** expire. Confirm it is off before you finish — `make
-  reset` disarms it in both Regions and `make verify` fails if the paired Region is still armed.
+  DynamoDB and S3, so Lambda egress has no route off the VPC.
+- The FIS config bucket is encrypted at rest and blocks all four categories of public access;
+  only the FIS and Lambda execution roles can reach it.
+- No credentials, keys or deployment-specific identifiers are committed. `make lint` runs
+  `scripts/scan-secrets.py`, which fails the build on account IDs, phone numbers, instance and
+  TDG UUIDs, VPC and subnet IDs, access keys and private keys.
+- Experiment 4's chaos flag does **not** expire. `make reset` disarms it in both Regions and
+  `make verify` fails if the paired Region is still armed.
+
+### Accepted for this sample — and what each one assumes
+
+Static analysis findings are suppressed in the template with a written reason on each resource
+(`Metadata.cfn_nag.rules_to_suppress` and `Metadata.checkov.skip`). Each was justified against the
+threat model of **a sample in a dedicated non-production account**: regenerable demo data, no real
+customers, an operator present for every run, and bounded self-reverting faults. Those assumptions
+are what make the reasoning valid, and **none of them hold in production**.
+
+| Accepted | The assumption it rests on |
+|---|---|
+| FIS role holds `ec2:*NetworkAcl*` on `Resource: '*'` | The account contains nothing a mis-targeted experiment must not reach |
+| Security group has no explicit egress rule | There is no NAT and no internet gateway, so egress has no route. Add either and the control disappears |
+| No Dead Letter Queue on the failover path | An operator is watching each run, so a dropped event shows up immediately as "traffic did not shift" |
+| No DynamoDB point-in-time recovery | The data is demo fixtures, recreated by `make post-deploy` in seconds |
+| No reserved concurrency | Untested against real call volume; a cap would throttle and drop live calls |
+| No VPC flow logs, S3 access logging or versioning | Forensics and auditability are not required for a demo |
+
+### Hardening required before production
+
+| # | Change | Priority | Re-test |
+|:-:|---|---|---|
+| 1 | Scope the FIS network policy to this stack's VPC, and gate the destructive NACL verbs on the `managedbyFIS=true` tag FIS applies to the ACL it clones | **Highest** | Experiment 2, live call |
+| 2 | Add explicit `SecurityGroupEgress` limited to the DynamoDB and S3 gateway-endpoint prefix lists | High | Experiments 1–3, live call each |
+| 3 | Add an SQS DLQ on the EventBridge rule target, plus an alarm on its depth | High | `make verify` |
+| 4 | Enable DynamoDB PITR on all three tables | Medium | `make verify` |
+| 5 | Enable VPC flow logs | Medium | `make verify` |
+| 6 | Add S3 access logging and versioning — **and update cleanup to delete object versions**, or stack deletion will fail | Medium | Cleanup dry run |
+| 7 | Re-evaluate reserved concurrency against real call volume | Low | Load test |
+
+Items 3 and 4 are the cheap wins: additive, no existing code path touched, verifiable without a
+phone call. Items 1 and 2 change the network path the faults depend on, so getting either wrong
+makes the experiments silently stop working while still looking healthy — each needs a real call to
+confirm.
+
+Beyond this list, production use needs a security review against your own organisation's controls,
+and chaos testing against a production contact centre additionally needs blast-radius planning, a
+rollback plan, and agreement from whoever owns the customer-facing service.
 
 ---
 
@@ -734,7 +771,6 @@ Lex GR enabled, the replica bot is removed when the primary bot is deleted.
 | `docs/` | Architecture diagram and its `awsdac` source |
 | `RUNBOOK.md` | The test procedure |
 | `FIXES.md` | Every defect found against a real ACGR instance, and what is deliberately not a bug |
-| `SecurityFindings/SECURITY-FINDINGS.md` | Disposition and justification for all 54 static-analysis findings, plus production hardening |
 
 ```bash
 make help                          # list every target

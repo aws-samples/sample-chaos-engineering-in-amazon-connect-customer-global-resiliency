@@ -55,11 +55,9 @@ cdk.out/
 .mx.txt
 .tdgnum.json
 .testflow2.json
-# Security scan exports are not source and may name real resources, so the folder's
-# contents are ignored -- EXCEPT the justification doc, which is source and is linked
-# from the README and the template. Note the pattern is 'SecurityFindings/*', not
-# 'SecurityFindings/': a bare directory pattern stops git descending, and the negation
-# below would then never be evaluated.
-SecurityFindings/*
-!SecurityFindings/SECURITY-FINDINGS.md
+# Security review material is LOCAL ONLY and never published. The scan export names real
+# resources, and the findings disposition is submitted with the review ticket rather than
+# shipped in the sample. The template and code carry self-contained justifications for
+# every suppression, so nothing here is needed to understand the repository.
+SecurityFindings/
 *.csv
