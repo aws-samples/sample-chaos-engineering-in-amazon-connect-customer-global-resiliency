@@ -1,5 +1,10 @@
 # Test Runbook
 
+> ⚠️ **This sample is for non-production use only.** Deploy and run it in a dedicated AWS account
+> with no production workloads. The FIS execution role can modify network ACLs on any VPC in the
+> account. See the [security section in the README](README.md#security-posture-and-production-hardening)
+> for the full posture, accepted findings, and what to change before any production use.
+
 **The procedure for running the four chaos experiments.** Every command, what to press on the
 keypad, what you should hear, and what to check afterwards.
 
