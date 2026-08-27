@@ -122,10 +122,6 @@ the fault being modelled is a bad configuration value rather than an infrastruct
 
 ![Architecture](docs/architecture.png)
 
-> Diagram source is `docs/architecture.dac.yaml`. Regenerate with
-> `awsdac docs/architecture.dac.yaml --output docs/architecture.png` (delete the PNG first —
-> `awsdac` prompts before overwriting).
-
 ```
                         ┌──────────────────────────────────┐
                         │  Traffic Distribution Group      │
@@ -768,7 +764,7 @@ Lex GR enabled, the replica bot is removed when the source bot is deleted.
 | `scripts/extract-flows.py` | Regenerates the reference JSON and validates flow structure |
 | `scripts/scan-secrets.py` | Fails the build on any committed credential or deployment-specific identifier |
 | `scripts/wire-replica-flow.sh` | Post-deploy, **only** when `EnableLexGlobalResiliency=false` |
-| `docs/` | Architecture diagram and its `awsdac` source |
+| `docs/` | Architecture diagram |
 | `RUNBOOK.md` | The test procedure |
 
 ```bash
