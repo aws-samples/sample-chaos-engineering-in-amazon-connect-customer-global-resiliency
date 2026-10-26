@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+venv/
+
+# Lambda packages
+*.zip
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CDK/CFN
+cdk.out/
+.cdk.staging/
+
+# Binary documents (architecture diagrams, design notes, drafts)
+*.docx
+*.doc
+*.pdf
+
+# Local working files that are not part of the sample
+/.*.json
+/.*.txt
+/.*.log
+SecurityFindings/
+*.csv
+scan-report*.json
+FIXES.md
+blog-*.md
+docs/*.drawio
+docs/*.drawio.png
+docs/rendered_arch.png
+docs/final2.drawio.png

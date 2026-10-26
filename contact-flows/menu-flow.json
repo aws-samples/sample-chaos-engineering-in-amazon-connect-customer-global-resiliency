@@ -1,0 +1,172 @@
+{
+  "Version": "2019-10-30",
+  "StartAction": "entry",
+  "Actions": [
+    {
+      "Identifier": "entry",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Connected in region $.AwsRegion. Welcome to the chaos engineering sample."
+      },
+      "Transitions": {
+        "NextAction": "menu",
+        "Errors": [
+          {
+            "NextAction": "menu",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "menu",
+      "Type": "GetParticipantInput",
+      "Parameters": {
+        "Text": "Press 1 for the account lookup experiment. Press 2 for the call audit experiment. Press 3 for the speech latency experiment. Press 4 for the queue overflow experiment.",
+        "InputTimeLimitSeconds": "10",
+        "StoreInput": "False"
+      },
+      "Transitions": {
+        "NextAction": "invalid",
+        "Conditions": [
+          {
+            "NextAction": "to-exp1",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "1"
+              ]
+            }
+          },
+          {
+            "NextAction": "to-exp2",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "2"
+              ]
+            }
+          },
+          {
+            "NextAction": "to-exp3",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "3"
+              ]
+            }
+          },
+          {
+            "NextAction": "to-exp4",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "4"
+              ]
+            }
+          }
+        ],
+        "Errors": [
+          {
+            "NextAction": "invalid",
+            "ErrorType": "NoMatchingCondition"
+          },
+          {
+            "NextAction": "invalid",
+            "ErrorType": "InputTimeLimitExceeded"
+          },
+          {
+            "NextAction": "invalid",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "to-exp1",
+      "Type": "TransferToFlow",
+      "Parameters": {
+        "ContactFlowId": "EXP1_FLOW_ID"
+      },
+      "Transitions": {
+        "NextAction": "invalid",
+        "Errors": [
+          {
+            "NextAction": "invalid",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "to-exp2",
+      "Type": "TransferToFlow",
+      "Parameters": {
+        "ContactFlowId": "EXP2_FLOW_ID"
+      },
+      "Transitions": {
+        "NextAction": "invalid",
+        "Errors": [
+          {
+            "NextAction": "invalid",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "to-exp3",
+      "Type": "TransferToFlow",
+      "Parameters": {
+        "ContactFlowId": "EXP3_FLOW_ID"
+      },
+      "Transitions": {
+        "NextAction": "invalid",
+        "Errors": [
+          {
+            "NextAction": "invalid",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "to-exp4",
+      "Type": "TransferToFlow",
+      "Parameters": {
+        "ContactFlowId": "EXP4_FLOW_ID"
+      },
+      "Transitions": {
+        "NextAction": "invalid",
+        "Errors": [
+          {
+            "NextAction": "invalid",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "invalid",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "No valid selection was received. Goodbye."
+      },
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "disconnect",
+      "Type": "DisconnectParticipant",
+      "Parameters": {},
+      "Transitions": {}
+    }
+  ]
+}

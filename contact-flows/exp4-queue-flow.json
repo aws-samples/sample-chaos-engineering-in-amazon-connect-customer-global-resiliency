@@ -1,0 +1,137 @@
+{
+  "Version": "2019-10-30",
+  "StartAction": "entry",
+  "Actions": [
+    {
+      "Identifier": "entry",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Connected in region $.AwsRegion. Experiment four, queue overflow."
+      },
+      "Transitions": {
+        "NextAction": "lex-input",
+        "Errors": [
+          {
+            "NextAction": "lex-input",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "lex-input",
+      "Type": "ConnectParticipantWithLexBot",
+      "Parameters": {
+        "Text": "How can I help you today? You can ask to look up your account or check an order.",
+        "LexV2Bot": {
+          "AliasArn": "arn:aws:lex:$.AwsRegion:ACCOUNT_ID:bot-alias/BOT_ID/BOT_ALIAS_ID"
+        }
+      },
+      "Transitions": {
+        "NextAction": "ok",
+        "Conditions": [
+          {
+            "NextAction": "ok",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "LookupCustomer"
+              ]
+            }
+          },
+          {
+            "NextAction": "ok",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "CheckOrderStatus"
+              ]
+            }
+          }
+        ],
+        "Errors": [
+          {
+            "NextAction": "overflow-msg",
+            "ErrorType": "NoMatchingError"
+          },
+          {
+            "NextAction": "overflow-msg",
+            "ErrorType": "NoMatchingCondition"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "ok",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "I found your information. Transferring to an agent."
+      },
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "overflow-msg",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "All agents are currently busy. Please hold. This is experiment four."
+      },
+      "Transitions": {
+        "NextAction": "set-overflow-queue",
+        "Errors": [
+          {
+            "NextAction": "set-overflow-queue",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "set-overflow-queue",
+      "Type": "UpdateContactTargetQueue",
+      "Parameters": {
+        "QueueId": "OVERFLOW_QUEUE_ARN"
+      },
+      "Transitions": {
+        "NextAction": "transfer-overflow",
+        "Errors": [
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "transfer-overflow",
+      "Type": "TransferContactToQueue",
+      "Parameters": {},
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "QueueAtCapacity"
+          },
+          {
+            "NextAction": "disconnect",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Identifier": "disconnect",
+      "Type": "DisconnectParticipant",
+      "Parameters": {},
+      "Transitions": {}
+    }
+  ]
+}
