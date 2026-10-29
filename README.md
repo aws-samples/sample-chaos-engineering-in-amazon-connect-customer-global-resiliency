@@ -690,55 +690,28 @@ depend on one — that path is composite alarm → EventBridge → `TrafficShift
 
 ## Synthetic traffic generator (optional)
 
-`make deploy` deploys `ConnectChaos-TrafficGenerator-{region}` by default
-(`EnableTrafficGenerator=true`; the template default is `false`), plus a **disabled** EventBridge
-schedule. It lets you exercise the alarm → composite alarm → EventBridge → `TrafficShiftHandler`
-chain **without placing phone calls**. **None of the four experiments uses it**; it is an optional
-tool for testing that chain on its own.
+`make deploy` also deploys `ConnectChaos-TrafficGenerator-{region}` (`EnableTrafficGenerator=true`;
+the template default is `false`) and a **disabled** EventBridge schedule. **None of the four
+experiments, `make verify` or `make reset` uses it.** It only lets you test the alarm → composite
+alarm → EventBridge → `TrafficShiftHandler` chain without placing phone calls:
 
 ```bash
-GEN=ConnectChaos-TrafficGenerator-$SOURCE_REGION
-
 # AWS CLI v2 needs --cli-binary-format for a raw JSON payload, otherwise it fails with
 # "Invalid base64".
-aws lambda invoke --function-name $GEN --region $SOURCE_REGION \
-  --cli-binary-format raw-in-base64-out \
-  --payload '{"mode":"healthy","count":10}' /dev/stdout
-
-# faults: lambda | dynamodb | lex | flow | all
-aws lambda invoke --function-name $GEN --region $SOURCE_REGION \
-  --cli-binary-format raw-in-base64-out \
+# mode: healthy | faulty;  fault_type: lambda | dynamodb | lex | flow | all
+aws lambda invoke --function-name ConnectChaos-TrafficGenerator-$SOURCE_REGION \
+  --region $SOURCE_REGION --cli-binary-format raw-in-base64-out \
   --payload '{"mode":"faulty","fault_type":"dynamodb","count":10}' /dev/stdout
 ```
 
-The schedule `ConnectChaos-TrafficGen-Schedule-{region}` is deployed **disabled**. To run the
-generator continuously, enable it, and disable it again when you are finished:
-
-```bash
-aws events enable-rule  --name ConnectChaos-TrafficGen-Schedule-$SOURCE_REGION --region $SOURCE_REGION
-aws events disable-rule --name ConnectChaos-TrafficGen-Schedule-$SOURCE_REGION --region $SOURCE_REGION
-```
-
 Each fault type publishes a datapoint with the namespace, name and dimensions that one
-experiment's alarm watches, so the alarm reacts to it. AWS advises against publishing to
-namespaces that begin with `AWS/`
-([PutMetricData](https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_PutMetricData.html));
-this optional tool does so deliberately, in a dedicated account:
-
-| `fault_type` | Emits | Trips |
-|---|---|---|
-| `lambda` | `AWS/Connect` `ContactFlowErrors`, `ContactFlowName=ConnectChaos-Exp1-Lambda` | Exp 1 alarm |
-| `dynamodb` | `AWS/Connect` `ContactFlowErrors`, `ContactFlowName=ConnectChaos-Exp2-DynamoDB` | Exp 2 alarm |
-| `lex` | `AWS/Lambda` `Duration` ≈ 31 s on `LexFulfillmentHandler` | Exp 3 alarm |
-| `flow` | `AWS/Connect` `LongestQueueWaitTime` on `ConnectChaos-Overflow` | Exp 4 alarm |
-| `all` | all of the above | every alarm, and the composite |
-
-> **⚠ Two limits.** Synthetic points can be mistaken for real ones on your dashboard, so
-> keep the schedule disabled except while you are using it. And the generator never runs a
-> contact flow, so it **cannot substitute for a real call**: it proves the alarm → traffic shift
-> chain, but not that a flow takes its Error branch or that a fault is attributed to the right
-> component.
-> `ContactFlowErrors` and `LongestQueueWaitTime` are only produced by Connect for real contacts.
+experiment's alarm watches (`lambda` → Exp 1, `dynamodb` → Exp 2, `lex` → Exp 3, `flow` → Exp 4,
+`all` → every alarm and the composite). AWS advises against publishing to namespaces that begin
+with `AWS/` ([PutMetricData](https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_PutMetricData.html));
+this optional tool does so deliberately, so use it only in a dedicated account, keep the schedule
+`ConnectChaos-TrafficGen-Schedule-{region}` disabled unless you are using it, and remember it
+**cannot substitute for a real call**: it never runs a contact flow, so it does not prove that a
+flow takes its failure path.
 
 ---
 
