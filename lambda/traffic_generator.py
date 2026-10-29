@@ -1,8 +1,8 @@
 """
-Synthetic Traffic Generator for Amazon Connect FIS Chaos Engineering Sample.
+Synthetic Traffic Generator for Amazon Connect Customer FIS Chaos Engineering Sample.
 
 This Lambda generates synthetic CloudWatch metric data points that simulate
-real Amazon Connect traffic. Use it to exercise the alarm -> composite alarm -> EventBridge ->
+real Amazon Connect Customer traffic. Use it to exercise the alarm -> composite alarm -> EventBridge ->
 TrafficShiftHandler chain without placing phone calls.
 
 What it does NOT do: it never runs a contact flow, so it cannot prove that a flow takes its

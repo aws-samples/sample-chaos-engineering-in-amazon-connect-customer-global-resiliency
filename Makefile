@@ -1,4 +1,4 @@
-# Makefile for the Amazon Connect chaos engineering sample.
+# Makefile for the Amazon Connect Customer chaos engineering sample.
 #
 # Packages the Lambda code, stages it in S3, deploys the CloudFormation template to both
 # Regions of an ACGR pair, then seeds, verifies and resets. README.md covers installation and

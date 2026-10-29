@@ -1,7 +1,7 @@
 """
 ConnectChaos-CallLogger Lambda
 
-Invoked DIRECTLY by the Amazon Connect contact flow via an "Invoke AWS Lambda
+Invoked DIRECTLY by the Amazon Connect Customer contact flow via an "Invoke AWS Lambda
 function" (InvokeLambdaFunction) block — NOT through Lex. In this sample only the
 Experiment 2 flow (menu option 2) invokes it, straight after the region announcement.
 
@@ -26,7 +26,7 @@ Because the flow treats this write as a required step, a DynamoDB outage makes i
 fail. This function runs in the SAME VPC subnets FIS Experiment 2 disrupts
 (aws:network:disrupt-connectivity, scope=dynamodb), so when the experiment severs
 the DynamoDB path the put_item raises within ~2s. The function does NOT swallow the
-error, so Amazon Connect records a failed invocation and routes the contact down
+error, so Amazon Connect Customer records a failed invocation and routes the contact down
 the InvokeLambdaFunction block's Error branch — which is what increments the
 AWS/Connect ContactFlowErrors metric that Experiment 2 is designed to observe.
 
@@ -34,7 +34,7 @@ AWS/Connect ContactFlowErrors metric that Experiment 2 is designed to observe.
 AWS/Lambda Errors and is handled by the Lex block's own error branch — it does NOT
 produce ContactFlowErrors.)
 
-Event shape (Amazon Connect Lambda invocation)
+Event shape (Amazon Connect Customer Lambda invocation)
 -----------------------------------------------
 {
   "Details": {
@@ -52,7 +52,7 @@ Event shape (Amazon Connect Lambda invocation)
   "Name": "ContactFlowEvent"
 }
 
-Return: a flat map of string -> string (Amazon Connect requirement).
+Return: a flat map of string -> string (Amazon Connect Customer requirement).
 """
 
 import os
@@ -117,11 +117,11 @@ def lambda_handler(event, context):
     }
 
     # Any exception (network disruption during FIS Exp 2, timeout, throttling)
-    # propagates on purpose so Amazon Connect records a failed invocation and routes
+    # propagates on purpose so Amazon Connect Customer records a failed invocation and routes
     # the contact down the block's Error branch, incrementing AWS/Connect
     # ContactFlowErrors.
     call_log_table.put_item(Item=item)
 
     logger.info(f"Logged contact {contact_id} (ANI={ani}, region={REGION})")
-    # Amazon Connect requires a flat map of string values.
+    # Amazon Connect Customer requires a flat map of string values.
     return {'logged': 'true', 'contactId': contact_id}

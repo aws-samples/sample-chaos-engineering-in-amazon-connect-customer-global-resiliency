@@ -94,7 +94,7 @@ ALLOWED_ERRORS = {
 
 
 def validate(name, flow):
-    """Reject flows Amazon Connect would refuse, and ACGR-unsafe region pinning."""
+    """Reject flows Amazon Connect Customer would refuse, and ACGR-unsafe region pinning."""
     problems = []
     ids = [a["Identifier"] for a in flow["Actions"]]
     if len(ids) != len(set(ids)):
