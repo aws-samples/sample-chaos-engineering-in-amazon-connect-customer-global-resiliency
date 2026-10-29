@@ -177,7 +177,7 @@ Two details in that diagram carry more weight than they look like they do:
 |:-:|:----:|---|---|---|---|
 | **1** | `1` | `ConnectChaos-AccountLookup` Lambda | FIS `aws:lambda:invocation-error` (`preventExecution=true`) | `ContactFlowErrors` on `ConnectChaos-Exp1-Lambda` (AWS/Connect) | Flow takes its `InvokeLambdaFunction` Error branch; alarm fires; traffic shifts |
 | **2** | `2` | DynamoDB reachability | FIS `aws:network:disrupt-connectivity` (`scope=dynamodb`) on both Lambda subnets | `ContactFlowErrors` on `ConnectChaos-Exp2-DynamoDB` (AWS/Connect) | The audit write fails; flow takes its Error branch; alarm fires; traffic shifts |
-| **3** | `3` | `LexFulfillmentHandler` code hook | FIS `aws:lambda:invocation-add-delay` (~31 s startup delay) | `Duration` Maximum (AWS/Lambda) | Code hook runs slow but returns cleanly; `Duration` ≈ 31,000 ms with `Errors` = 0 |
+| **3** | `3` | `LexFulfillmentHandler` code hook | FIS `aws:lambda:invocation-add-delay` (~31 s startup delay) | `Duration` Maximum (AWS/Lambda) | Code hook runs slow but returns cleanly; `Duration` ≈ 31,000 ms with `Errors` = 0. Lex waits only 30 s for a code hook by default, so it gives up first and the flow plays its error message |
 | **4** | `4` | Contact flow configuration | A DynamoDB chaos flag, **not** FIS | `LongestQueueWaitTime` on `ConnectChaos-Overflow` (AWS/Connect) | Contact is parked on a queue no agent can receive; queue wait climbs past 60 s |
 
 ### How each experiment stays distinguishable
@@ -236,27 +236,40 @@ so the DynamoDB failure takes the flow's Error branch.
 ### Experiment 3 — the Lex code hook becomes too slow to be useful
 
 FIS injects a ~31 s startup delay while the function's own timeout is 40 s, so the code hook runs
-slow but still returns cleanly. It is observed as latency, not as an error.
+slow but still returns cleanly: from the function's side it is latency, not an error. Amazon Lex
+is less patient than the function. It
+[waits 30 seconds for a code hook by default](https://docs.aws.amazon.com/lexv2/latest/dg/context-mgmt-session-attribs.html),
+which is less than the injected delay, so Lex gives up first and the flow takes its error branch.
 
-- **Caller hears:** a long pause. If the Lex block takes its error branch, the flow then plays
-  *"The lookup service is taking too long. This is experiment three."*
+- **Caller hears:** a long pause, then
+  *"The lookup service is taking too long. This is experiment three."* The flow plays that same
+  line for any problem in the Lex block, including a phrase Lex does not recognise, so hearing it
+  straight away means the Lex block did not get usable input, not that the fault is active.
 - **Alarm:** `ConnectChaos-Exp3-Latency-{region}`, threshold `LexCodeHookLatencyThresholdMs`
   (default 7000 ms)
 - **The only experiment not alarmed on a Connect metric, deliberately.** It is a *latency* fault:
-  the function succeeds, so a flow error is not guaranteed. The injected delay raises the
-  function's `Duration` directly, so a latency threshold is the measurement that matches the fault.
+  the function succeeds, so `AWS/Lambda Errors` stays at 0, and the flow's error branch just plays
+  a message, so error metrics, including the flow-error metric, can stay flat. The injected delay
+  raises the function's `Duration` directly, so a latency threshold is the measurement that
+  matches the fault.
 - **Why not `AWS/Lex RuntimeLambdaErrors`?** This sample does not alarm on it; the Exp 3 alarm
   watches Lambda `Duration`.
 - **Needs about a minute to arm**, as with Experiment 1.
 
 ### Experiment 4 — a bad config value parks the caller on an unstaffed queue
 
+When the lookup works, the caller is served by self-service: the flow confirms the account and the
+call ends, with no queue involved. When the lookup fails, the flow falls back to the agent queue.
 A DynamoDB chaos flag makes the fulfillment Lambda return `Failed` to Lex.
 `ConnectChaos-Exp4-Queue` routes the failure path to **`ConnectChaos-Overflow`** — a queue
 referenced by **no routing profile**, so no agent can ever receive its contacts — and transfers
-the contact there. It waits indefinitely and `LongestQueueWaitTime` climbs.
+the contact there. It waits indefinitely and `LongestQueueWaitTime` climbs. A bad configuration
+value therefore turns self-service failures into a growing queue.
 
 - **Caller hears:** *"All agents are currently busy. Please hold. This is experiment four."*
+  The flow sends any problem in the Lex block to the same queue, so a phrase Lex does not
+  recognise also parks the caller there with the flag off. The `LexFulfillmentHandler` log shows
+  whether the flag was read as enabled.
 - **Alarm:** `ConnectChaos-Exp4-Queue-{region}`, threshold `QueueWaitSecondsThreshold`
   (default 60 s)
 - **Not a FIS experiment.** You toggle a DynamoDB item. It does **not** expire on its own — you
@@ -270,8 +283,10 @@ the contact there. It waits indefinitely and `LongestQueueWaitTime` climbs.
 **The flag is Region-scoped (`chaos_flag#<region>`) on purpose, and this is the most important
 lesson in the sample.** The config table is a DynamoDB Global Table. A single shared key would
 replicate the fault to the replica Region, and traffic transition could never recover: the caller would land
-in a Region reading the same broken row and queueing into the same unstaffed queue. Every
-dashboard green, every alarm correct, traffic moved, customer still broken.
+in a Region reading the same broken row and queueing into the same unstaffed queue. The alarms
+would fire correctly and traffic would move, and the customer would still be broken. The runbook
+arms the source Region's key only, so it shows the working case; the failing case is what the
+quote below describes.
 
 > **A dependency failure that lives in replicated data is not a regional failure, and no amount
 > of traffic shifting will fix it.**
@@ -279,6 +294,14 @@ dashboard green, every alarm correct, traffic moved, customer still broken.
 Multi-Region architectures can fail this way — a poisoned config row, a bad feature flag, a
 corrupt cache entry, a schema migration. All replicate faithfully to the standby, which is the
 one thing you did not want replicated. Do not "simplify" the flag back to a single shared key.
+
+**Why shift traffic at all?** If Region A cannot serve callers, they do not have to wait there.
+Shifting the traffic distribution group sends new calls to Region B, and with Global Resiliency
+you can also
+[distribute your agents across both Regions](https://docs.aws.amazon.com/connect/latest/adminguide/overview-agent-distribution.html),
+so agents who are signed in can receive those calls. This sample has no agents by design, so the
+recovery call is handled by self-service and ends. In a real deployment, a caller who needs an
+agent would join a queue in Region B and be answered there.
 
 ---
 
@@ -340,16 +363,15 @@ customers are routed back. The runbook's reset step does this.
 `RegionSwitchDelaySeconds` (default **120**, maximum 600) holds the traffic shift after the alarm
 fires. Setting it to `0` shifts immediately.
 
-The delay exists because **a traffic transition that follows the alarm immediately is hard to
-demonstrate.** With no delay, traffic has already moved by the time you have read the alarm state
-in the console — so nobody experiences the impaired Region, and the thing the sample exists to
-show happens invisibly. The
-dwell gives you a window to place a call *into the broken Region*, hear the failure prompt for
-yourself, and only then watch traffic move.
-
-It also reflects something real. Shifting an entire contact centre's telephony is not free: calls
+The delay exists because **shifting an entire contact centre's telephony is not free**: calls
 in progress stay where they are, agents in the replica Region pick up the load, and a transient
-blip is not worth that disruption. A short dwell is a crude but genuine form of flap damping.
+blip is not worth that disruption. A short dwell is a crude but genuine form of flap damping, and
+the handler re-checks that the alarm is still in `ALARM` before it acts.
+
+**What you can hear during the dwell.** Each FIS experiment's own alarm is also its stop
+condition, so FIS ends the fault at about the moment the alarm fires. Do not expect to hear the
+failure during the dwell in Experiments 1–3. In Experiment 4 the flag stays set until you turn it
+off, so the broken Region stays broken throughout the dwell.
 
 One behaviour the dwell introduced, and how it is handled: a sleeping handler could **undo
 a reset.** If you reset traffic to 100/0 while a handler was still in its dwell, it would wake up
@@ -833,7 +855,7 @@ Replica before source, because the DynamoDB global tables are owned by the sourc
 | FIS layer ARN resolved from public SSM | Both the publishing account **and** the version differ per Region, so a hand-copied ARN is a common source of error |
 | Lambda S3 key includes a code content hash | A fixed key made CloudFormation skip code updates and ship stale Lambdas while reporting success |
 | Composite alarm has an explicit `DependsOn` | The rule names children in a `!Sub` literal, so CloudFormation cannot infer the dependency and creation races |
-| A configurable dwell before the traffic shift | An immediate traffic transition is hard to observe, and shifting a contact centre on a transient blip is not desirable |
+| A configurable dwell before the traffic shift | Shifting a contact centre's telephony on a transient blip is not desirable, and the handler re-checks the alarm before it acts |
 | The handler re-checks the alarm after the dwell | A handler that is still dwelling could otherwise undo an operator's reset |
 | Manual recovery | An operator should confirm the fault is resolved before customers are routed back |
 

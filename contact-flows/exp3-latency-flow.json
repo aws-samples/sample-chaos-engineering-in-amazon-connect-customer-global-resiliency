@@ -65,7 +65,7 @@
       "Identifier": "ok",
       "Type": "MessageParticipant",
       "Parameters": {
-        "Text": "I found your information. Transferring to an agent."
+        "Text": "I found your information. Thank you for calling."
       },
       "Transitions": {
         "NextAction": "disconnect",

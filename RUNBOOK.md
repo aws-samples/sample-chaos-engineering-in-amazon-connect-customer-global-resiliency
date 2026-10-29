@@ -169,7 +169,7 @@ handler.
 (`aws connect list-flow-associations`). It cannot prove the call is answered — that is what the
 baseline call in Step 3 is for.
 
-Then confirm every alarm is clear, in **both** Regions. An experiment's stop condition is a
+Then confirm every `ConnectChaos-` alarm is clear, in **both** Regions. An experiment's stop condition is a
 CloudWatch alarm, so an alarm that is already in `ALARM` would stop the experiment as it starts:
 
 ```bash
@@ -198,9 +198,10 @@ Every row must read `OK` or `INSUFFICIENT_DATA`. Open the dashboard now so you c
 2. Listen for **"Connected in region us-east-1"** (or whichever Region is source). That
    announcement alone tells you where the call landed — no log inspection needed.
 3. Press **1** on the keypad.
-4. Key **1 2 3 4 5** on the keypad. Use the keypad, not your voice: account numbers are collected
-   as DTMF so that speech recognition is not a variable in the test.
-5. Expect **"Welcome back, John Doe."**
+4. Key **1 2 3 4 5** on the keypad, then press **#**. The prompt asks for the pound key. Use the
+   keypad, not your voice: account numbers are collected as DTMF so that speech recognition is not
+   a variable in the test.
+5. Expect **"Welcome back, John Doe. Your account is in good standing."**
 6. Hang up.
 
 Then confirm the **source** Region served it:
@@ -316,7 +317,7 @@ aws fis start-experiment --experiment-template-id $EXP1 --region $SOURCE_REGION 
 |---|---|
 | Dial `$PHONE` | *"Connected in region us-east-1"* |
 | Press **1** | prompt for your account number |
-| Key **any 5 digits** | ***"The account lookup service is unavailable. This is experiment one."*** |
+| Key **any 5 digits**, then press **#** | ***"The account lookup service is unavailable. This is experiment one."*** |
 
 > A `NOT_FOUND` or `INVALID_INPUT` result is **not** the fault — those return normally and the
 > flow branches on them with a `Compare` block. Only a genuine invocation failure reaches the
@@ -433,8 +434,12 @@ aws fis start-experiment --experiment-template-id $EXP3 --region $SOURCE_REGION 
 | Do | Expect |
 |---|---|
 | Dial `$PHONE` | *"Connected in region us-east-1"* |
-| Press **3** | the Lex prompt |
-| Answer, then key **1 2 3 4 5** | a long silence (the injected delay is ~31 s). If the Lex block takes its error branch you then hear ***"The lookup service is taking too long. This is experiment three."*** |
+| Press **3** | *"Experiment three, speech latency."* then the Lex prompt, *"How can I help you today?"* |
+| Say **"I want to look up my account"** | *"What is your account number?"* |
+| Within 4 seconds, key **1 2 3 4 5** and press **#** (or say the number) | a long silence (the injected delay is ~31 s, and Lex waits 30 s for a code hook by default), then ***"The lookup service is taking too long. This is experiment three."*** |
+
+The flow plays that same line for any problem in the Lex block. If Lex does not recognise your
+phrase, or hears no answer in time, you hear it straight away with no fault involved — call again.
 
 **4. Verify.**
 
@@ -454,11 +459,13 @@ aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Durati
 **Pass:** a `Duration` Maximum around **31,000 ms**, the alarm in `ALARM`, and `Errors` still
 **0** — the function returns successfully, which is what separates Experiment 3 from Experiment 1.
 
-> This experiment alarms on Lambda `Duration`, not on `ContactFlowErrors`: a flow error is not
-> guaranteed because the function returns successfully.
+> This experiment alarms on Lambda `Duration`, not on `ContactFlowErrors`: the function returns
+> successfully, and the flow's error branch just plays a message, so error metrics can stay flat.
 
-**5. Recovery call — press `3` again.** Expect *"Connected in region us-west-2"* then
-*"I found your information."*
+**5. Recovery call — press `3` again.** Say the same phrase and key the digits. Expect *"Connected
+in region us-west-2"*, then Lex's answer (*"Welcome back, John Doe…"*) and the flow's closing
+line, *"I found your information. Thank you for calling."* The call then ends: the sample has no
+agents.
 
 **6.** ➡️ **[Step R](#step-r--reset-between-every-experiment).**
 
@@ -489,12 +496,18 @@ usual failure.**
 | Do | Expect |
 |---|---|
 | Dial `$PHONE` | *"Connected in region us-east-1"* |
-| Press **4** | the Lex prompt |
-| Answer, then key **1 2 3 4 5** | ***"All agents are currently busy. Please hold. This is experiment four."*** |
+| Press **4** | *"Experiment four, queue overflow."* then the Lex prompt, *"How can I help you today?"* |
+| Say **"I want to look up my account"** | *"What is your account number?"* |
+| Within 4 seconds, key **1 2 3 4 5** and press **#** (or say the number) | ***"All agents are currently busy. Please hold. This is experiment four."*** |
 | **Start counting from that hold prompt** and stay on the line comfortably past the 60 s threshold | silence — the contact is parked on an unstaffed queue |
 
 **The 60 s clock starts at the hold prompt, not when you dial.** The IVR takes some time first
 (region announcement, Lex prompt, your reply, the account number, the code hook).
+
+The flow sends any problem in the Lex block to the same queue, so a phrase Lex does not recognise
+also parks the caller there with the flag off. The pass table in Step 4 lists the
+`LexFulfillmentHandler` log showing the flag read as enabled, which is how to confirm the flag
+was the cause.
 
 **3. Turn the flag off. It does not expire.**
 
@@ -544,8 +557,10 @@ aws cloudwatch get-metric-statistics --namespace AWS/Connect \
 > If the metric never appears at all, list the real dimensions and compare them with the alarm:
 > `aws cloudwatch list-metrics --namespace AWS/Connect --metric-name LongestQueueWaitTime --region $SOURCE_REGION`
 
-**5. Recovery call — press `4` again**, with the flag now off. Expect *"Connected in region
-us-west-2"* then *"I found your information."*
+**5. Recovery call — press `4` again**, with the flag now off. Say the same phrase and key the
+digits. Expect *"Connected in region us-west-2"*, then Lex's answer (*"Welcome back, John Doe…"*)
+and the flow's closing line, *"I found your information. Thank you for calling."* The call then
+ends. This is the self-service path: the lookup worked, so nothing needs a queue or an agent.
 
 **6.** ➡️ **[Step R](#step-r--reset-between-every-experiment)**, and confirm the flag is off.
 
@@ -611,8 +626,11 @@ whole traffic transition chain. **Step R after every one.**
 > |:-:|:-:|---|
 > | 1 | `1` | *"Welcome back, John Doe"* |
 > | 2 | `2` | *"Your call has been recorded for quality purposes"* |
-> | 3 | `3` | *"I found your information"* |
-> | 4 | `4` | *"I found your information"* (flag off) |
+> | 3 | `3` | Lex's *"Welcome back, John Doe…"*, then *"I found your information. Thank you for calling."* |
+> | 4 | `4` | Lex's *"Welcome back, John Doe…"*, then *"I found your information. Thank you for calling."* (flag off) |
+>
+> Experiments 3 and 4 end the call after that closing line. The sample has no agents, so ending
+> there is intentional.
 >
 > Every recovery call opens with *"Connected in region &lt;replica&gt;"*. That announcement is the
 > proof of which Region served it, and it needs no log inspection.
