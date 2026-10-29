@@ -1,8 +1,8 @@
-# Amazon Connect Chaos Engineering with FIS and ACGR Traffic Transition
+# Amazon Connect Customer Chaos Engineering with FIS and ACGR Traffic Transition
 
-Inject controlled faults into a live Amazon Connect contact centre with **AWS Fault Injection
+Inject controlled faults into a live Amazon Connect Customer contact centre with **AWS Fault Injection
 Service (FIS)**, watch CloudWatch attribute the failure to the component that broke, and verify
-that **Amazon Connect Global Resiliency (ACGR)** shifts telephony traffic to the replica Region —
+that **Amazon Connect Customer Global Resiliency (ACGR)** shifts telephony traffic to the replica Region —
 where the call is still answered.
 
 > **Requires AWS Enterprise Support (or AWS Unified Operations).** ACGR is onboarded through your AWS account team. This
@@ -63,7 +63,7 @@ here, test from there.
 A contact centre fails differently from a web service. There is no retry button, no page
 refresh, and no error page to read. A caller gets silence, a wrong prompt, or a hold that never
 ends — and every second of it is a person waiting on a phone line. Worse, the failures that hurt
-most are rarely Amazon Connect itself. They are the things Connect calls out to: a Lambda that
+most are rarely Amazon Connect Customer itself. They are the things it calls out to: a Lambda that
 throws, a database it cannot reach, a code hook that answers too slowly to matter, a queue with
 nobody in it.
 
@@ -554,7 +554,7 @@ make post-deploy STACK=$STACK \
 | Reset traffic to 100% source / 0% replica | Live routing state |
 
 > **⚠️ Skipping the association is easy to miss.** Every resource reports `CREATE_COMPLETE` and
-> every alarm in this sample reports `OK`, but calls never enter the flow. Amazon Connect counts
+> every alarm in this sample reports `OK`, but calls never enter the flow. Amazon Connect Customer counts
 > such calls in its `MisconfiguredPhoneNumbers` metric, which this sample does not alarm on.
 > `make verify` checks the link with `aws connect list-flow-associations --resource-type
 > VOICE_PHONE_NUMBER`. That proves the association exists; the baseline call in the runbook is
@@ -672,7 +672,7 @@ flow errors — see [Experiment 3](#experiment-3--the-lex-code-hook-becomes-too-
 
 **Metrics to watch per experiment.** The alarmed metric is the one that trips the alarm. The
 supporting metrics help you read what happened. The metric definitions are in the
-[Amazon Connect](https://docs.aws.amazon.com/connect/latest/adminguide/monitoring-cloudwatch.html)
+[Amazon Connect Customer](https://docs.aws.amazon.com/connect/latest/adminguide/monitoring-cloudwatch.html)
 and [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-metrics-types.html) references.
 
 | Experiment | Alarmed metric | Supporting metrics |
@@ -749,7 +749,7 @@ time, so this README quotes none. Use the official pricing pages:
 
 | Service | What drives the cost | Pricing |
 |---------|----------------------|---------|
-| Amazon Connect | Voice usage and telephony for your test calls, the phone number, and any Global Resiliency usage charges that apply to your plan | [Amazon Connect pricing](https://aws.amazon.com/connect/pricing/) |
+| Amazon Connect Customer | Voice usage and telephony for your test calls, the phone number, and any Global Resiliency usage charges that apply to your plan | [Amazon Connect Customer pricing](https://aws.amazon.com/products/connect/customer/pricing/) |
 | AWS FIS | The action-minutes while an experiment runs | [AWS FIS pricing](https://aws.amazon.com/fis/pricing/) |
 | Amazon Lex | Requests made during testing; check whether your Connect pricing plan includes them | [Amazon Lex pricing](https://aws.amazon.com/lex/pricing/) |
 | Amazon CloudWatch | Alarms (standard and composite) and dashboards | [Amazon CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/) |
