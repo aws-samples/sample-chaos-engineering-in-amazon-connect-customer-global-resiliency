@@ -465,7 +465,8 @@ aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Durati
 **0** — the function returns successfully, which is what separates Experiment 3 from Experiment 1.
 
 > This experiment alarms on Lambda `Duration`, not on `ContactFlowErrors`: the function returns
-> successfully, and the flow's error branch just plays a message, so error metrics may stay flat.
+> successfully, and the flow's failure path just plays a message that `ContactFlowErrors` may not
+> count, so error metrics may stay flat.
 
 **5. Recovery call — press `3` again.** Say the same phrase and key the digits. Expect *"Connected
 in region us-west-2"*, then Lex's answer (*"Welcome back, John Doe…"*) and the flow's closing

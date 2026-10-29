@@ -252,7 +252,7 @@ FIS injects a ~31 s startup delay while the function's own timeout is 40 s, so t
 slow but still returns cleanly: from the function's side it is latency, not an error. Amazon Lex
 is less patient than the function. It
 [waits 30 seconds for a code hook by default](https://docs.aws.amazon.com/lexv2/latest/dg/context-mgmt-session-attribs.html),
-which is less than the injected delay, so Lex gives up first and the flow takes its error branch.
+which is less than the injected delay, so Lex gives up first and the flow takes its failure path.
 
 - **Caller hears:** a long pause, then
   *"The lookup service is taking too long. This is experiment three."* The flow plays that same
@@ -261,8 +261,9 @@ which is less than the injected delay, so Lex gives up first and the flow takes 
 - **Alarm:** `ConnectChaos-Exp3-Latency-{region}`, threshold `LexCodeHookLatencyThresholdMs`
   (default 7000 ms)
 - **The only experiment not alarmed on a Connect metric, deliberately.** It is a *latency* fault:
-  the function succeeds, so `AWS/Lambda Errors` stays at 0, and the flow's error branch just plays
-  a message, so error metrics, including the flow-error metric, may stay flat. The dashboard's
+  the function succeeds, so `AWS/Lambda Errors` stays at 0, and the flow's failure path just plays
+  a message that `ContactFlowErrors` may not count, so error metrics, including the flow-error
+  metric, may stay flat. The dashboard's
   observation-only `ContactFlowErrors` panel for this flow lets you check. The injected delay
   raises the function's `Duration` directly, so a latency threshold is the measurement that
   matches the fault.
