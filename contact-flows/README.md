@@ -26,7 +26,7 @@ Edit the inline `Content` property in `cfn/main-template.yaml` — that is what 
 deploys — then run `make flows` to regenerate these copies. Do not edit the JSON directly;
 `make lint` regenerates and compares, so it will fail.
 
-## Four rules the generator enforces, each learned from a failed deploy
+## Four rules the generator enforces
 
 **1. `$.AwsRegion`, never a hardcoded Region.** The Lambda and Lex ARNs use the ACGR runtime
 token:
@@ -76,9 +76,3 @@ routes a timeout down the Success branch with the stored value `Timeout`.
 
 `scripts/extract-flows.py` asserts all of the above, so `make lint` catches a violation before a
 deploy does.
-
-## One thing that is easy to miss
-
-**DTMF digits can drop immediately after a `TransferToFlow`.** AWS documents that input entered
-before the next flow's prompt finishes may be truncated. Each experiment flow therefore opens with
-the Region announcement and a prompt before collecting anything, so a caller naturally waits.

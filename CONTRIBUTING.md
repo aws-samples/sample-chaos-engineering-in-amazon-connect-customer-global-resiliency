@@ -28,10 +28,30 @@ To send us a pull request, please:
 3. Run `make lint` and make sure it passes. There is no CI in this repository, so this is the check.
 4. Commit to your fork using clear commit messages.
 5. Send us a pull request, answering any default questions in the pull request interface.
-6. Pay attention to any automated CI failures reported in the pull request, and stay involved in the conversation.
+6. Stay involved in the conversation on your pull request.
 
 GitHub provides additional document on [forking a repository](https://help.github.com/articles/fork-a-repo/) and
 [creating a pull request](https://help.github.com/articles/creating-a-pull-request/).
+
+## Before you commit
+
+`make lint` runs `scripts/scan-secrets.py`, which fails on AWS access keys, private keys,
+credential assignments, and any identifier tied to one deployment: account IDs, phone numbers,
+Connect instance / TDG / flow / queue / contact UUIDs, VPC and subnet IDs, FIS experiment
+template IDs, and Lex bot or alias IDs.
+
+Every check is a **pattern**, never a denylist of known values, because a denylist would have to
+contain the very values it exists to keep out. Add a value to `ALLOWED_LITERALS` only if it is
+genuinely public, or append `scan-secrets: allow` to a single line.
+
+Scan only what is about to be committed, rather than the whole tree, with:
+
+```bash
+python3 scripts/scan-secrets.py --staged
+```
+
+There is no CI in this repository; validation is local. The `cfn-lint` warning `W1030` is expected,
+because the `ReplicatedLexBot*` parameters are intentionally empty in source-Region deploys.
 
 ## Finding contributions to work on
 

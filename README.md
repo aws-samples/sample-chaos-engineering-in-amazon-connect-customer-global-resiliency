@@ -98,7 +98,7 @@ FIS gives four things this sample depends on:
 | What FIS provides | Why it matters here |
 |---|---|
 | **Managed fault actions** | `aws:lambda:invocation-error` and `aws:lambda:invocation-add-delay` break a Lambda *from outside*, with no change to your handler code (the FIS extension layer is attached to the target function). |
-| **A defined blast radius** | Targets are explicit ARNs. Experiment 1 errors one named function; it cannot spread to the other three. |
+| **A defined blast radius** | Targets are explicit ARNs. Experiment 1 errors one named function; it cannot spread to any other function. |
 | **Automatic expiry** | Each FIS experiment (1–3) carries a duration (`PT5M`). If you walk away, the fault removes itself. Experiment 4 is a data flag and does not expire. |
 | **Stop conditions** | Every experiment is bound to **its own** detection alarm. The moment the alarm fires, FIS halts the experiment — the fault stops as soon as it has proven the point. |
 
@@ -182,10 +182,11 @@ Two details in that diagram carry more weight than they look like they do:
 
 ### How each experiment stays distinguishable
 
-Amazon Connect publishes exactly **one** metric meaning "a flow failed" — `ContactFlowErrors` —
-dimensioned by `ContactFlowName`. Each experiment therefore gets **its own contact flow**, which
-turns that single metric into independent per-experiment signals with no metric math and no
-overlap. Three of the four alarms are Connect-native as a result.
+[`ContactFlowErrors`](https://docs.aws.amazon.com/connect/latest/adminguide/monitoring-cloudwatch.html)
+counts the number of times a flow's error branch ran, and is dimensioned by `ContactFlowName`.
+Each experiment therefore gets **its own contact flow**, which turns that one metric into
+independent per-experiment signals with no metric math and no overlap. Three of the four alarms
+are Connect-native as a result.
 
 Three supporting decisions make the attribution hold:
 
@@ -198,8 +199,11 @@ Three supporting decisions make the attribution hold:
 - **Every failure path has its own prompt**, naming the experiment, so the caller experience
   identifies the fault; a test run against the wrong experiment is easy to spot.
 
-**Input is DTMF, not speech, deliberately.** Keypad digits remove speech recognition as a
-variable, so a wrong result points at the lookup rather than at how the number was transcribed.
+**Account numbers are keyed on the keypad (DTMF) wherever possible.** The menu and Experiment 1
+use keypad digits, which removes speech recognition as a variable, so a wrong result points at the
+lookup rather than at how the number was transcribed. Experiments 3 and 4 hand the call to an
+Amazon Lex bot, so there you say one short phrase ("I want to look up my account") and then key
+the account number.
 
 > **On cascades — read this before you judge a result.** Every fault here ultimately flows
 > through a Lambda, so `AWS/Lambda Errors` also rises during Experiments 1 and 2 (Experiment 3's
@@ -221,6 +225,10 @@ code, so the flow takes the block's Error branch.
   `INVALID_INPUT` and the flow branches on it with a `Compare` block, so a mistyped number can
   never masquerade as an injected fault.
 - **Needs about a minute to arm** — see [below](#why-you-must-wait-before-calling-experiments-1-and-3).
+- **Why this fault:** it shows that a function can be failed from outside its code, and that the
+  per-flow metric names the flow that broke.
+- **Outcome:** the alarm fires, the composite alarm follows, traffic shifts to the replica Region,
+  and the recovery call (same digit) is answered there.
 
 ### Experiment 2 — DynamoDB is unreachable
 
@@ -232,6 +240,11 @@ so the DynamoDB failure takes the flow's Error branch.
 - **Alarm:** `ConnectChaos-Exp2-DynamoDB-{region}`, threshold `ContactFlowErrorsThreshold`
 - **No arming delay.** It is network-level, so the DynamoDB path is severed for the whole
   experiment. **With no arming delay, it is a good one to run first.**
+- **Why this fault:** it shows that a healthy function can fail because of what it depends on. The
+  audit write is the only DynamoDB-dependent step in the flow, so the failure is attributable.
+- **Outcome:** the alarm fires, the composite alarm follows, traffic shifts to the replica Region,
+  and the recovery call (same digit) is answered there, using the replica's own network path to
+  DynamoDB.
 
 ### Experiment 3 — the Lex code hook becomes too slow to be useful
 
@@ -249,12 +262,14 @@ which is less than the injected delay, so Lex gives up first and the flow takes 
   (default 7000 ms)
 - **The only experiment not alarmed on a Connect metric, deliberately.** It is a *latency* fault:
   the function succeeds, so `AWS/Lambda Errors` stays at 0, and the flow's error branch just plays
-  a message, so error metrics, including the flow-error metric, can stay flat. The injected delay
+  a message, so error metrics, including the flow-error metric, may stay flat. The dashboard's
+  observation-only `ContactFlowErrors` panel for this flow lets you check. The injected delay
   raises the function's `Duration` directly, so a latency threshold is the measurement that
   matches the fault.
-- **Why not `AWS/Lex RuntimeLambdaErrors`?** This sample does not alarm on it; the Exp 3 alarm
-  watches Lambda `Duration`.
 - **Needs about a minute to arm**, as with Experiment 1.
+- **Outcome:** the `Duration` alarm fires, the composite alarm follows, traffic shifts to the
+  replica Region, and the recovery call (same digit) is answered there by its own Lex bot and its
+  own copy of the code hook.
 
 ### Experiment 4 — a bad config value parks the caller on an unstaffed queue
 
@@ -279,6 +294,9 @@ value therefore turns self-service failures into a growing queue.
   answering. An unstaffed queue removes the human from the test entirely.
 - **The signal is accumulated queue wait, not a count**, so the caller has to stay on the line.
   The 60 s clock starts at the hold prompt, not when you dial. Exact timing is in the runbook.
+- **Outcome:** the queue-wait alarm fires once the caller has waited past the threshold, the
+  composite alarm follows, and traffic shifts to the replica Region. With the flag off, the
+  recovery call there is served by self-service and ends.
 
 **The flag is Region-scoped (`chaos_flag#<region>`) on purpose, and this is the most important
 lesson in the sample.** The config table is a DynamoDB Global Table. A single shared key would
@@ -302,6 +320,12 @@ you can also
 so agents who are signed in can receive those calls. This sample has no agents by design, so the
 recovery call is handled by self-service and ends. In a real deployment, a caller who needs an
 agent would join a queue in Region B and be answered there.
+
+**The proof that matters.** Moving traffic to a Region that cannot answer is not resilience.
+Besides the recovery call after each experiment, the runbook has an explicit check that does not
+depend on any experiment: shift traffic by hand, place a call, and confirm that the replica
+Region's `ConnectChaos-AccountLookup` logged it and the source Region's did not. See
+[the runbook's proof](RUNBOOK.md#the-proof-that-matters--a-call-answered-in-the-replica-region).
 
 ---
 
@@ -335,8 +359,8 @@ AWS documents a ramp-up of up to 60 seconds before a fault affects all invocatio
 An experiment's stop condition is a CloudWatch alarm, so an alarm that is already in `ALARM` stops
 the experiment as it starts.
 
-**Experiment 2 needs no wait** — it is network-level, applies immediately, and stays applied for
-the whole experiment. **Experiment 4 needs no wait** — the flag is read on the next call.
+**Experiment 2 needs no wait** — it is network-level, so it has no extension ramp-up, and it stays
+applied for the whole experiment. **Experiment 4 needs no wait** — the flag is read on the next call.
 
 ---
 
@@ -439,7 +463,8 @@ git clone https://github.com/aws-samples/sample-chaos-engineering-in-amazon-conn
 cd sample-chaos-engineering-in-amazon-connect-customer-global-resiliency
 ```
 
-You supply **two** values; the rest are derived. Both are UUIDs:
+You supply **two** values to install; the rest are derived. Both are UUIDs. The
+[RUNBOOK](RUNBOOK.md#step-0--shell-variables) adds a third, `PHONE`, for testing:
 
 | Variable | What it is | Example (not a real value) | How to find yours |
 |---|---|---|---|
@@ -496,15 +521,15 @@ make deploy STACK=$STACK REGION=$SOURCE_REGION \
 Then read `LexBotId` and `LexBotAliasId` from the source stack outputs and pass them to the
 replica Region as `REPLICATED_LEX_BOT_ID` and `REPLICATED_LEX_BOT_ALIAS_ID`.
 
-**Tokyo/Osaka is not supported by this sample.** Lex GR is not available for
-`ap-northeast-1`→`ap-northeast-3`, and without it the bot IDs differ per Region, so the
-replicated flows would still point at the source Region's bot and the replica could not serve a
-call. ACGR replicates changes in both directions, so patching the replica copy of a flow is not a
-safe workaround either. One possible approach is to make the flow itself select the Lex alias by Region (the
-[ACGR requirements](https://docs.aws.amazon.com/connect/latest/adminguide/connect-global-resiliency-requirements.html)
-say `$.AwsRegion` is supported in Lex ARNs), which this sample does not do and has not validated. If you try it, deploy both Regions with
-`ENABLE_LEX_GR=false`, edit the flows in the source template, and note that `make post-deploy`
-then skips the Lex wiring.
+**Deploying by hand.** The template is larger than CloudFormation's 51,200-byte limit for an inline
+template body, so stage it through S3 and pass `--template-url` instead of `--template-body`.
+`make deploy` does this for you.
+
+**Tokyo/Osaka is not supported by this sample.**
+[Lex Global Resiliency](https://docs.aws.amazon.com/lexv2/latest/dg/navigation-gr.html) currently
+works only with the US East/US West and London/Frankfurt pairs. Without it the bot IDs differ per
+Region, so the replicated flows would still point at the source Region's bot and the replica could
+not serve a call.
 </details>
 
 ### Step 3 — the things CloudFormation cannot do
@@ -618,7 +643,7 @@ and `LAMBDA_SUBNET_A` / `LAMBDA_SUBNET_B` / `LAMBDA_SG` when `CREATE_VPC=false`.
 | EventBridge rule `ConnectChaos-RegionSwitch-{region}` | ✓ | ✓ | Requires `EnableAutoRegionSwitch=true`. Composite alarm → `TrafficShiftHandler` |
 | `ConnectChaos-TrafficGenerator-{region}` + EventBridge schedule `ConnectChaos-TrafficGen-Schedule-{region}` | ✓ | ✓ | Requires `EnableTrafficGenerator=true`; the schedule is deployed **disabled** |
 | Dashboard | ✓ | ✓ | `regional` or `unified` |
-| IAM roles (one per function, plus the FIS execution role) | ✓ | ✓ | Per Region |
+| IAM roles (one per function, plus the Lex bot role and the FIS execution role) | ✓ | ✓ | Per Region |
 
 **No NAT gateway and no internet gateway are created.** Only DynamoDB and S3 reachability is
 needed and gateway endpoints for both are free, so the VPC adds **$0**. S3 is not optional: the
@@ -641,16 +666,24 @@ Dashboard **`ConnectChaos-{region}`**, one panel per experiment:
 
 Two further panels are **observation-only**: `ContactFlowErrors` for the Exp 3 flow, and
 `AWS/Lambda` `Errors` for `ConnectChaos-AccountLookup`, `ConnectChaos-CallLogger` and
-`LexFulfillmentHandler`. Neither is alarmed. The Exp 3 flow errors should not become the alarm — see [Experiment 3](#experiment-3--the-lex-code-hook-becomes-too-slow-to-be-useful).
+`LexFulfillmentHandler`. Neither is alarmed. Experiment 3 is alarmed on `Duration` rather than on
+flow errors — see [Experiment 3](#experiment-3--the-lex-code-hook-becomes-too-slow-to-be-useful).
+
+**Metrics to watch per experiment.** The alarmed metric is the one that trips the alarm. The
+supporting metrics help you read what happened. The metric definitions are in the
+[Amazon Connect](https://docs.aws.amazon.com/connect/latest/adminguide/monitoring-cloudwatch.html)
+and [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-metrics-types.html) references.
+
+| Experiment | Alarmed metric | Supporting metrics |
+|---|---|---|
+| 1 | `ContactFlowErrors` on `ConnectChaos-Exp1-Lambda` | Lambda `Errors` on `ConnectChaos-AccountLookup`. Connect retries a failed invocation up to three times, so one call can add several |
+| 2 | `ContactFlowErrors` on `ConnectChaos-Exp2-DynamoDB` | Lambda `Errors` on `ConnectChaos-CallLogger` |
+| 3 | `Duration` Maximum on `LexFulfillmentHandler` | Lambda `Errors` stays at 0; Lambda `Invocations` shows the call reached the function; `ContactFlowErrors` for the Exp 3 flow may stay flat |
+| 4 | `LongestQueueWaitTime` on `ConnectChaos-Overflow` | `QueueSize` on the same queue; Lambda `Errors` on `LexFulfillmentHandler` stays at 0, because the function returns `Failed` to Lex instead of throwing |
+| All | The composite alarm | The `TrafficShiftHandler` log line `Traffic shifted: …` |
 
 **There is no SNS topic**, because nothing would be subscribed to it. Traffic transition does not
 depend on one — that path is composite alarm → EventBridge → `TrafficShiftHandler`.
-
-To get notified, create a topic, subscribe to it, then add `AlarmActions` and `OKActions` to
-`CompositeAlarm`. If you do, encrypt it with a **customer-managed** KMS key whose policy grants
-`cloudwatch.amazonaws.com` `kms:Decrypt` and `kms:GenerateDataKey*`. The default `alias/aws/sns`
-key does not allow CloudWatch alarms to publish, and an AWS managed key's policy cannot be
-edited (see [this AWS re:Post article](https://repost.aws/knowledge-center/cloudwatch-configure-alarm-sns)).
 
 ---
 
@@ -659,7 +692,8 @@ edited (see [this AWS re:Post article](https://repost.aws/knowledge-center/cloud
 `make deploy` deploys `ConnectChaos-TrafficGenerator-{region}` by default
 (`EnableTrafficGenerator=true`; the template default is `false`), plus a **disabled** EventBridge
 schedule. It lets you exercise the alarm → composite alarm → EventBridge → `TrafficShiftHandler`
-chain **without placing phone calls**.
+chain **without placing phone calls**. **None of the four experiments uses it**; it is an optional
+tool for testing that chain on its own.
 
 ```bash
 GEN=ConnectChaos-TrafficGenerator-$SOURCE_REGION
@@ -684,8 +718,11 @@ aws events enable-rule  --name ConnectChaos-TrafficGen-Schedule-$SOURCE_REGION -
 aws events disable-rule --name ConnectChaos-TrafficGen-Schedule-$SOURCE_REGION --region $SOURCE_REGION
 ```
 
-Each fault type emits the exact metric (namespace, name and dimensions) that one experiment's
-alarm watches, so CloudWatch cannot tell the datapoint from a real one:
+Each fault type publishes a datapoint with the namespace, name and dimensions that one
+experiment's alarm watches, so the alarm reacts to it. AWS advises against publishing to
+namespaces that begin with `AWS/`
+([PutMetricData](https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_PutMetricData.html));
+this optional tool does so deliberately, in a dedicated account:
 
 | `fault_type` | Emits | Trips |
 |---|---|---|
@@ -695,7 +732,7 @@ alarm watches, so CloudWatch cannot tell the datapoint from a real one:
 | `flow` | `AWS/Connect` `LongestQueueWaitTime` on `ConnectChaos-Overflow` | Exp 4 alarm |
 | `all` | all of the above | every alarm, and the composite |
 
-> **⚠ Two limits.** Synthetic points are indistinguishable from real ones on your dashboard, so
+> **⚠ Two limits.** Synthetic points can be mistaken for real ones on your dashboard, so
 > keep the schedule disabled except while you are using it. And the generator never runs a
 > contact flow, so it **cannot substitute for a real call**: it proves the alarm → traffic shift
 > chain, but not that a flow takes its Error branch or that a fault is attributed to the right
@@ -706,25 +743,21 @@ alarm watches, so CloudWatch cannot tell the datapoint from a real one:
 
 ## Cost
 
-| Service | Driver |
-|---------|--------|
-| Amazon Connect | Per-minute telephony + daily active use |
-| AWS FIS | $0.10 per action-minute |
-| Lambda | Invocations + duration (negligible) |
-| DynamoDB | On-demand read/write (negligible) |
-| CloudWatch | 4 standard alarms × $0.10 + 1 composite alarm × $0.50 = $0.90/mo, plus $3/mo per dashboard (the first 3 dashboards in an account are free) |
-| Lex V2 | Per request during testing: $0.004 per speech request, $0.00075 per text request (`en-GB`) |
-| S3 | FIS config + template staging (< $0.01/mo) |
-| **VPC** | **$0** — gateway endpoints are free, no NAT gateway is created |
+This sample deploys billable AWS services. Prices differ by Region and pricing plan and change over
+time, so this README quotes none. Use the official pricing pages:
 
-Prices are AWS list prices for `eu-west-2` and change; check the
-[CloudWatch](https://aws.amazon.com/cloudwatch/pricing/), [FIS](https://aws.amazon.com/fis/pricing/)
-and [Lex](https://aws.amazon.com/lex/pricing/) pricing pages before relying on them.
+| Service | What drives the cost | Pricing |
+|---------|----------------------|---------|
+| Amazon Connect | Voice usage and telephony for your test calls, the phone number, and any Global Resiliency usage charges that apply to your plan | [Amazon Connect pricing](https://aws.amazon.com/connect/pricing/) |
+| AWS FIS | The action-minutes while an experiment runs | [AWS FIS pricing](https://aws.amazon.com/fis/pricing/) |
+| Amazon Lex | Requests made during testing; check whether your Connect pricing plan includes them | [Amazon Lex pricing](https://aws.amazon.com/lex/pricing/) |
+| Amazon CloudWatch | Alarms (standard and composite) and dashboards | [Amazon CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/) |
+| Lambda, DynamoDB, S3 | Small request and storage volumes | [Lambda](https://aws.amazon.com/lambda/pricing/), [DynamoDB](https://aws.amazon.com/dynamodb/pricing/) and [S3](https://aws.amazon.com/s3/pricing/) pricing |
+| VPC | The sample uses gateway endpoints and creates no NAT gateway | [Amazon VPC pricing](https://aws.amazon.com/vpc/pricing/) |
 
-**All four experiments once:** a few dollars, excluding telephony. **Left standing:** about
-$4/month per Region at list price ($0.90 of alarms plus one $3 dashboard), less if the free tier
-applies. The traffic-generator schedule is deployed disabled; if you enable it, remember to
-disable it again.
+The alarms, dashboards and phone number keep billing while they exist, so follow
+[Cleanup](#cleanup) when you finish. The traffic-generator schedule is deployed disabled; if you
+enable it, remember to disable it again.
 
 ---
 
@@ -840,24 +873,18 @@ Replica before source, because the DynamoDB global tables are owned by the sourc
 
 | Decision | Rationale |
 |----------|-----------|
-| One contact flow per experiment | `ContactFlowErrors` is the only "flow failed" metric Connect publishes; its `ContactFlowName` dimension is the only way to get per-experiment attribution without metric math |
+| One contact flow per experiment | `ContactFlowErrors` counts a flow's error-branch runs and is dimensioned by `ContactFlowName`, which gives per-experiment attribution without metric math |
 | An attributing metric per experiment, not fault isolation | All faults also raise `Lambda Errors`; only each experiment's own metric names the cause |
 | Exp 1 targets the account-lookup Lambda, not the Lex code hook | Erroring the code hook would only raise `AWS/Lambda Errors`, which Exp 3 also touches, destroying attribution |
 | Exp 2 invokes a call logger directly from the flow | Otherwise `ContactFlowErrors` never fired and Exp 2 only rode the Lambda-Errors alarm |
-| Exp 3 uses Lambda `Duration`, not `ContactFlowErrors` or `RuntimeLambdaErrors` | A latency fault does not make the function fail, so a flow error is not guaranteed; `Duration` rises directly |
+| Exp 3 uses Lambda `Duration`, not `ContactFlowErrors` | A latency fault does not make the function fail, so error metrics may stay flat; `Duration` rises directly |
 | Exp 4 uses a no-agent queue + `LongestQueueWaitTime` | `MissedCalls` needs a staffed agent to deliberately not answer — not reproducible by a reader |
 | Exp 4's chaos flag is Region-scoped | A Global Table would replicate the fault to the standby, making traffic transition incapable of recovering |
-| DTMF input, not speech | Removes speech recognition as a variable in the lookup test |
-| Region announced at the start of every flow | Makes the serving Region audible instead of requiring two log groups to be cross-referenced |
-| `$.AwsRegion` in the flows' Lambda and Lex ARNs | ACGR replicates flow content verbatim; a hardcoded Region makes the replica Region call the **source's** dependencies, defeating traffic transition |
 | Explicit `IntegrationAssociation` (template for the source, `post-deploy` for the replica) | A Lex bot must be associated with the instance before a flow can invoke it |
 | `CreateVpc=true` with free gateway endpoints | Removes the VPC prerequisite at no cost. S3 reachability is mandatory — the FIS extension reads its config from S3 |
 | FIS layer ARN resolved from public SSM | Both the publishing account **and** the version differ per Region, so a hand-copied ARN is a common source of error |
 | Lambda S3 key includes a code content hash | A fixed key made CloudFormation skip code updates and ship stale Lambdas while reporting success |
 | Composite alarm has an explicit `DependsOn` | The rule names children in a `!Sub` literal, so CloudFormation cannot infer the dependency and creation races |
-| A configurable dwell before the traffic shift | Shifting a contact centre's telephony on a transient blip is not desirable, and the handler re-checks the alarm before it acts |
-| The handler re-checks the alarm after the dwell | A handler that is still dwelling could otherwise undo an operator's reset |
-| Manual recovery | An operator should confirm the fault is resolved before customers are routed back |
 
 ---
 
@@ -891,39 +918,10 @@ make history-scan                  # scan every commit on every ref for identifi
 make clean
 ```
 
-### No deployment-specific values in the repository
+### Checks before you commit
 
-`make lint` runs `scripts/scan-secrets.py`, which fails on AWS access keys, private keys,
-credential assignments, and any identifier tied to one deployment: account IDs, phone numbers,
-Connect instance / TDG / flow / queue / contact UUIDs, VPC and subnet IDs, FIS experiment
-template IDs, and Lex bot or alias IDs.
-
-Every check is a **pattern**, never a denylist of known values — a denylist would have to contain
-the very values it exists to keep out. Add a value to `ALLOWED_LITERALS` only if it is genuinely public, or append
-`scan-secrets: allow` to a single line.
-
-The runbook is written so you never need to paste these values: IDs come from `describe-stacks`
-outputs and shell variables at run time. Scan staged changes before committing with:
-
-```bash
-# Scan only what is about to be committed, rather than the whole tree.
-python3 scripts/scan-secrets.py --staged
-```
-
-Run `make lint` before committing. There is no CI in this repo; validation is local. `-i W1030`
-is expected — the `ReplicatedLexBot*` parameters are intentionally empty in source-Region
-deploys.
-
-**The template exceeds CloudFormation's 51,200-byte inline limit** (about 100 KB), so deploys must
-stage it through S3. `make deploy` does this automatically. If you deploy by hand, pass `--template-url` rather than `--template-body`.
-
-> **A failed first create ends in `ROLLBACK_COMPLETE`, and the stack must be deleted before you
-> deploy again.** Read the cause with `aws cloudformation describe-stack-events --stack-name
-> $STACK --region <REGION>` first. If rollback cannot delete a DynamoDB global table (DynamoDB
-> refuses to remove a replica that was added within the last 24 hours), the stack ends in
-> `ROLLBACK_FAILED`. Remove the replica with `aws dynamodb update-table --table-name <TABLE>
-> --region <SOURCE_REGION> --replica-updates 'Delete={RegionName=<REPLICA_REGION>}'`, wait for it
-> to finish, then delete the stack again.
+Run `make lint` before committing. It also scans for deployment-specific values; see
+[CONTRIBUTING](CONTRIBUTING.md#before-you-commit).
 
 ## License
 

@@ -92,7 +92,6 @@ get_out () { aws cloudformation describe-stacks --stack-name $STACK --region "$1
 export EXP1=$(get_out $SOURCE_REGION FISExperiment1)   # Lambda invocation error
 export EXP2=$(get_out $SOURCE_REGION FISExperiment2)   # DynamoDB network disruption
 export EXP3=$(get_out $SOURCE_REGION FISExperiment3)   # Lex code-hook latency
-export GEN=ConnectChaos-TrafficGenerator-$SOURCE_REGION
 ```
 
 **Guard — run this before anything else.** It fails loudly if an example value survived or a
@@ -113,7 +112,7 @@ case "$EXP1" in EXT*) ;; *) echo "FAIL  EXP1 is not a FIS template id: '$EXP1'";
 [ "$ok" = 1 ] && echo "OK  environment ready: acct=$ACCT instance=$INSTANCE_ID exp1=$EXP1"
 ```
 
-`EXP1`–`EXP3` must each be a FIS template ID, which begins `EXT` and is about fifteen characters.
+`EXP1`–`EXP3` must each be a FIS template ID, which begins `EXT`.
 An empty result means the stack name or Region is not what you think, or the stack has not finished
 deploying — stop and check the stack before going further.
 
@@ -230,7 +229,7 @@ Metric publication and alarm evaluation take time, so **do not conclude anything
 | Stage | Delay |
 |---|---|
 | `start-experiment` → fault actually effective (Exps 1 and 3) | up to about a minute (AWS documents a ramp-up of up to 60 s for the FIS Lambda extension) |
-| Exp 2 fault | immediate, and stays applied for the whole experiment |
+| Exp 2 fault | no extension ramp-up; stays applied for the whole experiment |
 | Exp 4 flag | applies to the next call |
 | Alarm fires → traffic shifted | **`RegionSwitchDelaySeconds`** (default 120 s) |
 
@@ -258,9 +257,7 @@ make reset STACK=$STACK SOURCE_REGION=$SOURCE_REGION \
            REPLICA_REGION=$REPLICA_REGION TDG_ID=$TDG_ID
 ```
 
-It stops running experiments in **both** Regions, restores 100% source / 0% replica, disarms the
-Experiment 4 chaos flag in **both** Regions, then waits for every alarm in both Regions to leave
-`ALARM` — and exits non-zero if they do not. Allow several minutes: CloudWatch returns an alarm to `OK` only after it has evaluated periods without breaching data, and `make reset` waits up to ten minutes before giving up.
+It exits non-zero if the alarms do not leave `ALARM`. Allow several minutes: CloudWatch returns an alarm to `OK` only after it has evaluated periods without breaching data, and `make reset` waits up to ten minutes before giving up.
 
 **Do not start the next experiment until it exits `0`.** The alarm wait is not cosmetic: each
 experiment's stop condition is its **own** detection alarm, so an alarm still in `ALARM` would trip the
@@ -270,9 +267,13 @@ stop condition as soon as the next experiment starts.
 <summary>Equivalent manual commands</summary>
 
 ```bash
-# stop anything running
-aws fis list-experiments --region $SOURCE_REGION \
-  --query "experiments[?state.status=='running'].id" --output text
+# stop anything running, in BOTH Regions
+for R in $SOURCE_REGION $REPLICA_REGION; do
+  for E in $(aws fis list-experiments --region $R \
+              --query "experiments[?state.status=='running'].id" --output text); do
+    aws fis stop-experiment --id $E --region $R
+  done
+done
 
 # restore traffic
 aws connect update-traffic-distribution --id $TDG_ID --region $SOURCE_REGION \
@@ -284,10 +285,11 @@ for R in $SOURCE_REGION $REPLICA_REGION; do
     --item '{"config_key":{"S":"chaos_flag#'"$R"'"},"enabled":{"BOOL":false}}'
 done
 
-# must return EMPTY, in BOTH Regions
+# must return EMPTY, in BOTH Regions (component alarms and the composite)
 for R in $SOURCE_REGION $REPLICA_REGION; do
   aws cloudwatch describe-alarms --region "$R" --alarm-name-prefix ConnectChaos- \
-    --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text
+    --alarm-types MetricAlarm CompositeAlarm \
+    --query "[MetricAlarms[?StateValue=='ALARM'].AlarmName, CompositeAlarms[?StateValue=='ALARM'].AlarmName][]" --output text
 done
 ```
 
@@ -316,7 +318,7 @@ aws fis start-experiment --experiment-template-id $EXP1 --region $SOURCE_REGION 
 | Do | Expect |
 |---|---|
 | Dial `$PHONE` | *"Connected in region us-east-1"* |
-| Press **1** | prompt for your account number |
+| Press **1** | *"Experiment one, account lookup."* then a prompt for your account number |
 | Key **any 5 digits**, then press **#** | ***"The account lookup service is unavailable. This is experiment one."*** |
 
 > A `NOT_FOUND` or `INVALID_INPUT` result is **not** the fault — those return normally and the
@@ -347,7 +349,7 @@ aws logs tail /aws/lambda/ConnectChaos-TrafficShiftHandler --region $SOURCE_REGI
 `Traffic shifted: $SOURCE_REGION=0%, $REPLICA_REGION=100%`.
 
 **5. Recovery call — press `1` again.** Dial once more and press **1**, the same digit. You should
-hear *"Connected in region us-west-2"* then *"Welcome back, John Doe"*. This is what proves the
+hear *"Connected in region us-west-2"* then *"Welcome back, John Doe. Your account is in good standing."* This is what proves the
 flow that just failed in the source Region now succeeds in the replica one.
 
 **6.** ➡️ **[Step R](#step-r--reset-between-every-experiment).**
@@ -365,17 +367,18 @@ flow that just failed in the source Region now succeeds in the replica one.
 
 ```bash
 # Blocks both Lambda subnets from the DynamoDB endpoint at the NACL. Network-level, so it
-# takes effect immediately and stays applied for the whole experiment.
+# needs no extension ramp-up and stays applied for the whole experiment.
 aws fis start-experiment --experiment-template-id $EXP2 --region $SOURCE_REGION \
   --query "experiment.{id:id,state:state.status}"
 ```
 
-**2. Call immediately — no wait needed.**
+**2. Call — no wait needed.** There is no extension ramp-up. Check that the experiment shows
+`running`, then dial.
 
 | Do | Expect |
 |---|---|
 | Dial `$PHONE` | *"Connected in region us-east-1"* |
-| Press **2** | ***"We could not record your call. This is experiment two."*** |
+| Press **2** | *"Experiment two, call audit logging."* then a short silence, then ***"We could not record your call. This is experiment two."*** |
 
 **3. Verify.**
 
@@ -397,6 +400,8 @@ aws logs tail /aws/lambda/ConnectChaos-CallLogger --region $SOURCE_REGION --sinc
 | Traffic distribution | source `0` / replica `100` |
 | `ConnectChaos-TrafficShiftHandler` log | `Traffic shifted: $SOURCE_REGION=0%, $REPLICA_REGION=100%` |
 | `ConnectChaos-CallLogger` log | a DynamoDB timeout or connection error |
+
+The short silence is Connect retrying the call logger, up to three times, before it takes the Error branch.
 
 `ContactFlowErrors` only increments for **real contacts**, so a live call is the true test here.
 Lambda `Errors` will also rise — expected, see the cascade note in the README.
@@ -460,7 +465,7 @@ aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Durati
 **0** — the function returns successfully, which is what separates Experiment 3 from Experiment 1.
 
 > This experiment alarms on Lambda `Duration`, not on `ContactFlowErrors`: the function returns
-> successfully, and the flow's error branch just plays a message, so error metrics can stay flat.
+> successfully, and the flow's error branch just plays a message, so error metrics may stay flat.
 
 **5. Recovery call — press `3` again.** Say the same phrase and key the digits. Expect *"Connected
 in region us-west-2"*, then Lex's answer (*"Welcome back, John Doe…"*) and the flow's closing
@@ -532,6 +537,21 @@ aws cloudwatch get-metric-statistics --namespace AWS/Connect \
   --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) --period 60 --statistics Maximum \
   --region $SOURCE_REGION \
   --query "sort_by(Datapoints,&Timestamp)[].{t:Timestamp,MaxSec:Maximum}" --output table
+
+# b) the composite alarm
+aws cloudwatch describe-alarms --alarm-types CompositeAlarm \
+  --alarm-names ConnectChaos-Composite-$SOURCE_REGION --region $SOURCE_REGION \
+  --query "CompositeAlarms[0].StateValue" --output text
+
+# c) the traffic shift — allow the 120 s dwell first
+aws connect get-traffic-distribution --id $TDG_ID --region $SOURCE_REGION \
+  --query "TelephonyConfig.Distributions" --output table
+
+# d) the handler's own account of what it did
+aws logs tail /aws/lambda/ConnectChaos-TrafficShiftHandler --region $SOURCE_REGION --since 10m
+
+# e) the cause, from the function's side: the chaos flag being read as enabled
+aws logs tail /aws/lambda/LexFulfillmentHandler --region $SOURCE_REGION --since 15m
 ```
 
 **Pass:**
@@ -579,8 +599,9 @@ aws connect update-traffic-distribution --id $TDG_ID --region $SOURCE_REGION \
   --telephony-config "{\"Distributions\":[{\"Region\":\"$SOURCE_REGION\",\"Percentage\":0},{\"Region\":\"$REPLICA_REGION\",\"Percentage\":100}]}"
 ```
 
-**2. Call, press `1`, key `12345`, and complete the IVR.** You should hear *"Connected in region
-us-west-2"* and then *"Welcome back, John Doe."*
+**2. Call, press `1`, key `12345` and press `#`, and complete the IVR.** You should hear
+*"Connected in region us-west-2"* and then *"Welcome back, John Doe. Your account is in good
+standing."*
 
 **3. Prove which Region's compute actually ran.**
 
@@ -624,7 +645,7 @@ whole traffic transition chain. **Step R after every one.**
 >
 > | Experiment | Digit | Expected on the recovery call |
 > |:-:|:-:|---|
-> | 1 | `1` | *"Welcome back, John Doe"* |
+> | 1 | `1` | *"Welcome back, John Doe. Your account is in good standing."* |
 > | 2 | `2` | *"Your call has been recorded for quality purposes"* |
 > | 3 | `3` | Lex's *"Welcome back, John Doe…"*, then *"I found your information. Thank you for calling."* |
 > | 4 | `4` | Lex's *"Welcome back, John Doe…"*, then *"I found your information. Thank you for calling."* (flag off) |
@@ -645,6 +666,8 @@ whole traffic transition chain. **Step R after every one.**
 | Exp 1 or 3 had no effect; the call just succeeded | You called before the fault armed | Wait ~60 s after `start-experiment`, then call |
 | The experiment stops straight after `start-experiment` | Its stop-condition alarm is in `ALARM` | Let `make reset` finish and exit `0` first |
 | Exp 2 alarm flat but Lambda `Errors` rising | The flow did not take its Error branch | A **real** call is required; synthetic metrics cannot exercise a flow branch |
+| Exp 3 plays the "taking too long" line straight away | Lex did not recognise your phrase, or got no answer in time. The flow plays that line for any problem in the Lex block | Call again: say "I want to look up my account" clearly and key the digits within 4 seconds |
+| Exp 4 plays the hold prompt but the flag log shows no flag read | The same Lex problem sends the caller to the queue even with the flag off | Check the `LexFulfillmentHandler` log; call again with a clear phrase |
 | Exp 4 metric shows a small number | Hung up before 60 s of *queue wait* accrued | Count from the hold prompt and stay on past the 60 s threshold |
 | Alarm stuck `INSUFFICIENT_DATA` | No datapoints match its dimension tuple | `aws cloudwatch list-metrics --namespace <ns> --metric-name <name>` and compare with the alarm |
 | Traffic never shifts although the alarm fired | Still inside the `RegionSwitchDelaySeconds` dwell | Wait the dwell out (default 120 s), then re-check |
@@ -653,9 +676,11 @@ whole traffic transition chain. **Step R after every one.**
 | Replica Region answers nothing | Replica stack missing, or its Lex **alias** replica is not `Available` | `make verify` |
 | The source logs a call after traffic transition | The flow still points at the source's Lambda or Lex | `$.AwsRegion` / Lex GR — `make verify` |
 | The second experiment proves nothing | Traffic still at 0% source | Step R |
+| A first deploy ends in `ROLLBACK_COMPLETE` | The first create failed and rolled back | Read the cause with `aws cloudformation describe-stack-events --stack-name $STACK --region <REGION>`, then delete the stack before deploying again |
+| The stack ends in `ROLLBACK_FAILED` | Rollback could not delete a DynamoDB global table: DynamoDB refuses to remove a replica that was added within the last 24 hours | `aws dynamodb update-table --table-name <TABLE> --region <SOURCE_REGION> --replica-updates 'Delete={RegionName=<REPLICA_REGION>}'`, wait for it to finish, then delete the stack again |
 | `DELETE_FAILED` on cleanup | FIS config bucket not empty | Empty `ccfis-…` first — see [README → Cleanup](README.md#cleanup) |
 
 Before changing an experiment's metric, re-read the reasoning in
 [README.md](README.md#the-four-experiments). Several obvious-looking "improvements" — alarming
-Exp 3 on `ContactFlowErrors`, restoring `AWS/Lex RuntimeLambdaErrors`, sharing one chaos flag
-across Regions — change what the experiment measures; read the reasoning there first.
+Exp 3 on `ContactFlowErrors`, sharing one chaos flag across Regions — change what the experiment
+measures; read the reasoning there first.
