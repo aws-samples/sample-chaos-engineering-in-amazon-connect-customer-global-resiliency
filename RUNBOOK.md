@@ -678,7 +678,7 @@ whole traffic transition chain. **Step R after every one.**
 | The source logs a call after traffic transition | The flow still points at the source's Lambda or Lex | `$.AwsRegion` / Lex GR — `make verify` |
 | The second experiment proves nothing | Traffic still at 0% source | Step R |
 | A first deploy ends in `ROLLBACK_COMPLETE` | The first create failed and rolled back | Read the cause with `aws cloudformation describe-stack-events --stack-name $STACK --region <REGION>`, then delete the stack before deploying again |
-| The stack ends in `ROLLBACK_FAILED` | Rollback could not delete a DynamoDB global table: DynamoDB refuses to remove a replica that was added within the last 24 hours | `aws dynamodb update-table --table-name <TABLE> --region <SOURCE_REGION> --replica-updates 'Delete={RegionName=<REPLICA_REGION>}'`, wait for it to finish, then delete the stack again |
+| The stack ends in `ROLLBACK_FAILED` | Rollback could not delete a DynamoDB global table | `aws dynamodb update-table --table-name <TABLE> --region <SOURCE_REGION> --replica-updates 'Delete={RegionName=<REPLICA_REGION>}'`, wait for it to finish, then delete the stack again |
 | `DELETE_FAILED` on cleanup | FIS config bucket not empty | Empty `ccfis-…` first — see [README → Cleanup](README.md#cleanup) |
 
 Before changing an experiment's metric, re-read the reasoning in
