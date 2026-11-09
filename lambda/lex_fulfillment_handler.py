@@ -1,0 +1,278 @@
+"""
+LexFulfillmentHandler Lambda
+
+Attached to the Lex V2 bot as its FulfillmentCodeHook. It:
+  1. looks the caller up in DynamoDB (LookupCustomer / CheckOrderStatus intents)
+  2. checks THIS Region's chaos flag (chaos_flag#<region>) for Experiment 4
+  3. returns the fulfilment result to Lex, which hands it back to the Connect contact flow
+
+The chaos flag is read AFTER the customer lookup, so a DynamoDB outage raises from the lookup
+first and only a deliberately armed flag takes the Failed path.
+
+How each experiment relates to this function:
+  - Experiment 1 does NOT target it. Exp 1 errors ConnectChaos-AccountLookup, which the Exp 1
+    flow invokes directly.
+  - Experiment 2 (aws:network:disrupt-connectivity) severs DynamoDB for the Lambda subnets this
+    function runs in. The flow-level signal comes from ConnectChaos-CallLogger, not from here.
+  - Experiment 3 (aws:lambda:invocation-add-delay, ~31 s) targets THIS function. The Lambda
+    timeout is 40 s, so it still returns cleanly: the signal is AWS/Lambda Duration with
+    Errors at 0.
+  - Experiment 4 arms the chaos flag. This function then returns a Failed state to Lex and the
+    Exp 4 flow parks the caller on the unstaffed overflow queue
+    (signal: AWS/Connect LongestQueueWaitTime).
+
+Experiment 2's ContactFlowErrors is NOT produced here: a DynamoDB failure reached through Lex is
+handled by the flow's Lex block error branch. It is produced by call_logger.py, which the flow
+invokes directly via an "Invoke AWS Lambda function" block.
+"""
+
+import os
+import json
+import logging
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Environment variables set by CFN
+TABLE_NAME = os.environ['CUSTOMER_TABLE_NAME']
+CHAOS_TABLE_NAME = os.environ['CHAOS_TABLE_NAME']
+# Lambda sets AWS_REGION in every execution environment. Used to scope Experiment 4's chaos
+# flag per region so the fault is regional rather than replicated.
+REGION = os.environ.get('AWS_REGION', 'unknown')
+
+# Short, bounded DynamoDB timeouts so a DynamoDB outage (Experiment 2 severs the path from
+# this function's subnets too) fails FAST and CATCHABLY. Without them boto3's defaul
+# timeouts and retries can make a DynamoDB outage take far longer to surface. With a ~2s connect/read
+# timeout and no retries, the call raises within ~2s, the handler's except re-raises, and
+# Lex sees a prompt code-hook error. That surfaces as AWS/Lambda Errors and is handled by
+# the flow's Lex block; it does NOT produce ContactFlowErrors (see the module docstring).
+# These are DynamoDB client timeouts only; the function's own 40s timeout is wha
+# Experiment 3 relies on and must not be shortened.
+_DDB_CONFIG = Config(
+    connect_timeout=2,
+    read_timeout=2,
+    retries={'total_max_attempts': 1},
+)
+
+dynamodb = boto3.resource('dynamodb', config=_DDB_CONFIG)
+customer_table = dynamodb.Table(TABLE_NAME)
+chaos_table = dynamodb.Table(CHAOS_TABLE_NAME)
+
+
+def lambda_handler(event, context):
+    """
+    Lex V2 FulfillmentCodeHook handler.
+
+    Expected Lex V2 event structure:
+    {
+        "sessionState": {...},
+        "interpretations": [...],
+        "inputTranscript": "...",
+        "invocationSource": "FulfillmentCodeHook",
+        "sessionId": "...",
+        "bot": {"id": "...", "name": "...", "aliasId": "...", "localeId": "en_US"},
+        ...
+    }
+    """
+    logger.info(f"Received event: {json.dumps(event)}")
+
+    intent_name = event['sessionState']['intent']['name']
+    slots = event['sessionState']['intent']['slots']
+    invocation_source = event.get('invocationSource', 'FulfillmentCodeHook')
+
+    logger.info(f"Intent: {intent_name}, Slots: {json.dumps(slots)}, Source: {invocation_source}")
+
+    # ─────────────────────────────────────────────────────────────
+    # MAIN LOGIC: Customer lookup / order check in DynamoDB
+    # A DynamoDB failure (e.g. Experiment 2's network disruption) raises
+    # from the lookup, so the invocation fails and AWS/Lambda Errors rises.
+    #
+    # NOTE: We do the customer lookup BEFORE the chaos flag check so
+    # that a DynamoDB failure is not masked by the chaos flag path.
+    # ─────────────────────────────────────────────────────────────
+    if intent_name == 'LookupCustomer':
+        return handle_lookup_customer(intent_name, slots)
+    elif intent_name == 'CheckOrderStatus':
+        return handle_check_order(intent_name, slots)
+    else:
+        return handle_fallback(intent_name)
+
+
+def handle_lookup_customer(intent_name, slots):
+    """Look up customer by account number in DynamoDB."""
+    account_number = get_slot_value(slots, 'AccountNumber')
+
+    if not account_number:
+        return build_lex_response(
+            intent_name=intent_name,
+            fulfillment_state='Failed',
+            message="I couldn't find your account number. Please try again."
+        )
+
+    try:
+        response = customer_table.get_item(
+            Key={'account_id': account_number}
+        )
+        item = response.get('Item')
+
+        # ─────────────────────────────────────────────────────────
+        # EXPERIMENT 4 CHECK: Read chaos flag from DDB
+        # Placed AFTER the customer lookup so that:
+        #   - Exp 2 (DDB disruption) raises before we get here
+        #   - Exp 1/3 (Lambda error/timeout) never reach this code
+        #   - Only Exp 4 (chaos flag) triggers the Failed path below
+        # ─────────────────────────────────────────────────────────
+        chaos_enabled = _check_chaos_flag()
+        if chaos_enabled:
+            logger.warning(f"CHAOS FLAG ENABLED for {REGION} — returning Failed state to Lex")
+            return build_lex_response(
+                intent_name=intent_name,
+                fulfillment_state='Failed',
+                message="We're experiencing technical difficulties. Please try again later."
+            )
+
+        if item:
+            customer_name = item.get('customer_name', 'valued customer')
+            return build_lex_response(
+                intent_name=intent_name,
+                fulfillment_state='Fulfilled',
+                message=f"Welcome back, {customer_name}. I've pulled up your account. How can I help you today?"
+            )
+        else:
+            return build_lex_response(
+                intent_name=intent_name,
+                fulfillment_state='Fulfilled',
+                message="I couldn't find an account with that number. Let me transfer you to an agent."
+            )
+
+    except (ClientError, ConnectTimeoutError, ReadTimeoutError) as e:
+        # This path is hit during Experiment 2 (DDB network disruption)
+        logger.error(f"DynamoDB error: {str(e)}")
+        raise  # Re-raise so the invocation is reported as failed (AWS/Lambda Errors)
+
+
+def handle_check_order(intent_name, slots):
+    """Check order status in DynamoDB."""
+    order_id = get_slot_value(slots, 'OrderId')
+
+    if not order_id:
+        return build_lex_response(
+            intent_name=intent_name,
+            fulfillment_state='Failed',
+            message="I need your order ID to look that up."
+        )
+
+    try:
+        response = customer_table.get_item(
+            Key={'account_id': f"ORDER#{order_id}"}
+        )
+        item = response.get('Item')
+
+        # Chaos flag check (same rationale as handle_lookup_customer)
+        chaos_enabled = _check_chaos_flag()
+        if chaos_enabled:
+            logger.warning(f"CHAOS FLAG ENABLED for {REGION} — returning Failed state to Lex")
+            return build_lex_response(
+                intent_name=intent_name,
+                fulfillment_state='Failed',
+                message="We're experiencing technical difficulties. Please try again later."
+            )
+
+        if item:
+            status = item.get('order_status', 'processing')
+            return build_lex_response(
+                intent_name=intent_name,
+                fulfillment_state='Fulfilled',
+                message=f"Your order {order_id} is currently {status}."
+            )
+        else:
+            return build_lex_response(
+                intent_name=intent_name,
+                fulfillment_state='Fulfilled',
+                message=f"I couldn't find order {order_id}. Let me transfer you to support."
+            )
+
+    except (ClientError, ConnectTimeoutError, ReadTimeoutError) as e:
+        logger.error(f"DynamoDB error: {str(e)}")
+        raise
+
+
+def _check_chaos_flag():
+    """
+    Read THIS REGION's chaos flag from the DynamoDB config table.
+
+    The key is region-scoped on purpose: `chaos_flag#<region>`.
+
+    The config table is a Global Table, so a single shared key would replicate the fault to
+    the replica Region and Experiment 4 could never demonstrate recovery - traffic transition would move
+    the caller to a Region reading the same "broken" row, queueing into the same unstaffed
+    queue. Scoping by region makes the fault genuinely regional, like Exps 1-3, so the replica
+    Region serves normally after traffic transition. Replication still happens and is now harmless: the
+    row copies across, but each Region only ever reads its own key.
+
+    Returns True if chaos is enabled for this region, False otherwise.
+    If the config table is unreachable (e.g. during Exp 2's DynamoDB disruption), returns
+    False so the error propagates from the customer lookup instead.
+    """
+    flag_key = f'chaos_flag#{REGION}'
+    try:
+        chaos_response = chaos_table.get_item(
+            Key={'config_key': flag_key}
+        )
+        chaos_item = chaos_response.get('Item', {})
+        return chaos_item.get('enabled', False)
+    except (ClientError, ConnectTimeoutError, ReadTimeoutError) as e:
+        # If we can't read chaos table, assume chaos is NOT enabled.
+        # During Exp 2, DDB is unreachable — but the customer lookup
+        # already raised before we got here, so this path is only hi
+        # if the chaos config table specifically is unreachable while
+        # the customer table is fine (unlikely in practice).
+        logger.warning(f"Could not read chaos config {flag_key}: {str(e)}")
+        return False
+
+
+def handle_fallback(intent_name):
+    """Handle unrecognized intents."""
+    return build_lex_response(
+        intent_name=intent_name,
+        fulfillment_state='Failed',
+        message="I'm sorry, I didn't understand that. Let me transfer you to an agent."
+    )
+
+
+def get_slot_value(slots, slot_name):
+    """Extract resolved slot value from Lex V2 slot structure."""
+    slot = slots.get(slot_name)
+    if slot and slot.get('value'):
+        return slot['value'].get('interpretedValue') or slot['value'].get('originalValue')
+    return None
+
+
+def build_lex_response(intent_name, fulfillment_state, message):
+    """
+    Build Lex V2 fulfillment response.
+
+    fulfillment_state: 'Fulfilled' or 'Failed'
+    When 'Failed', Lex takes its failure path; in the Exp 4 flow that parks the caller on the
+    overflow queue
+    """
+    return {
+        "sessionState": {
+            "dialogAction": {
+                "type": "Close"
+            },
+            "intent": {
+                "name": intent_name,
+                "state": fulfillment_state
+            }
+        },
+        "messages": [
+            {
+                "contentType": "PlainText",
+                "content": message
+            }
+        ]
+    }
